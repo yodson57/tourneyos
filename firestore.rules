@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Événements ---
+    // Lecture : tout événement dont le tirage a été lancé (pools != null) est lisible
+    // par tout le monde (dashboard public), et un utilisateur connecté peut lire
+    // n'importe quel événement (y compris les brouillons, pour l'administration).
+    // Volontairement simple : une règle basée sur un champ imbriqué (ex. settings.publicAccess)
+    // a déjà cassé la lecture de TOUTE la collection par le passé — le filtrage fin
+    // de "accès public par événement" reste géré côté application.
+    match /events/{eventId} {
+      allow read: if resource.data.pools != null || request.auth != null;
+      allow create: if request.auth != null;
+      allow update, delete: if request.auth != null;
+    }
+
+    // --- Comptes utilisateurs ---
+    // Un utilisateur connecté peut lire l'annuaire (nécessaire à l'admin et aux
+    // "ayants droit" pour gérer rôles/équipes) et écrire (les vérifications fines
+    // de rôle sont faites côté application).
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // --- Table de correspondance identifiant -> email (pour le login par
+    // nom d'utilisateur / téléphone / ID de profil) ---
+    // Lecture publique par ID EXACT uniquement (jamais de liste possible avec get()),
+    // écriture réservée aux utilisateurs connectés.
+    match /loginLookup/{id} {
+      allow get: if true;
+      allow list: if false;
+      allow write: if request.auth != null;
+    }
+  }
+}
