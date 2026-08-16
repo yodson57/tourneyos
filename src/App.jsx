@@ -105,8 +105,57 @@ function defaultSettings(name) {
     showPlayerProfiles: true, showTopScorers: true, manualDraw: false,
     suspensionRule: 2, allowTeamRemovalAfterLaunch: false, qualifiersPerPool: 2,
     requireTeamLogo: false, showScorerPhoto: true, showCaptainPhoto: true, publicAccess: true,
+    cardValidity: "", cardHeader: "", cardOrientation: "horizontal", cardSizePreset: "86x54",
+    cardBg: "#FFFFFF", cardBorder: "#1F6E43", cardPhotoPosition: "left",
   };
 }
+
+const CARD_SIZE_PRESETS = {
+  "86x54": { w: 86, h: 54, label: "86 × 54 mm — carte bancaire" },
+  "74x105": { w: 74, h: 105, label: "74 × 105 mm — format A7" },
+  "100x150": { w: 100, h: 150, label: "100 × 150 mm — grand badge" },
+};
+const PAPER_SIZES = { A4: { w: 210, h: 297 }, A3: { w: 297, h: 420 } };
+const CARD_KIND_LABELS = { joueur: "Licence joueur", officiel: "Badge officiel", media: "Badge média" };
+
+/* Carte unique (licence joueur / badge officiel / badge média), rendue à l'identique
+   à l'écran et à l'impression, pilotée par la configuration visuelle de l'événement. */
+function CardFace({ kind, name, subLabel, idValue, photo, headerText, validity, cfg }) {
+  const preset = CARD_SIZE_PRESETS[cfg.cardSizePreset] || CARD_SIZE_PRESETS["86x54"];
+  const vertical = cfg.cardOrientation === "vertical";
+  const wMm = vertical ? Math.min(preset.w, preset.h) : Math.max(preset.w, preset.h);
+  const hMm = vertical ? Math.max(preset.w, preset.h) : Math.min(preset.w, preset.h);
+  const photoPos = cfg.cardPhotoPosition || "left";
+  const idLabel = kind === "joueur" ? "N° licence" : "N° matricule";
+  return (
+    <div
+      style={{
+        width: `${wMm}mm`, height: `${hMm}mm`, background: cfg.cardBg || "#fff",
+        border: `2px solid ${cfg.cardBorder || COLORS.turf}`, borderRadius: 6,
+        display: "flex", flexDirection: "column", overflow: "hidden",
+        fontFamily: "'Inter', sans-serif", breakInside: "avoid", pageBreakInside: "avoid",
+      }}
+    >
+      <div style={{ background: cfg.cardBorder || COLORS.turf, color: "#fff", padding: "4px 8px", fontSize: 8, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>
+        {headerText}
+      </div>
+      <div style={{ flex: 1, display: "flex", flexDirection: photoPos === "center" ? "column" : "row", alignItems: "center", justifyContent: photoPos === "center" ? "center" : "flex-start", gap: 8, padding: 8, ...(photoPos === "right" ? { flexDirection: "row-reverse" } : {}) }}>
+        <PlayerAvatar name={name} photo={photo} size={photoPos === "center" ? 40 : 34} />
+        <div style={{ minWidth: 0, textAlign: photoPos === "center" ? "center" : "left" }}>
+          <div style={{ fontWeight: 900, fontSize: 11, color: COLORS.ink, lineHeight: 1.1 }}>{name}</div>
+          {subLabel && <div style={{ fontSize: 8, color: "#8a8a80" }}>{subLabel}</div>}
+          <div style={{ fontSize: 7, color: "#8a8a80", marginTop: 2 }}>{CARD_KIND_LABELS[kind]}</div>
+        </div>
+      </div>
+      <div style={{ background: "#F5F1E8", padding: "3px 8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 6, textTransform: "uppercase", color: "#8a8a80" }}>{idLabel}</span>
+        <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 9, color: cfg.cardBorder || COLORS.turf }}>{idValue || "—"}</span>
+      </div>
+      {validity && <div style={{ fontSize: 6, textAlign: "center", color: "#8a8a80", padding: "1px 4px 3px" }}>Valide jusqu'au {validity}</div>}
+    </div>
+  );
+}
+
 
 const SLOTS = [
   { field: "Terrain A", time: "09:00" }, { field: "Terrain B", time: "09:00" },
@@ -549,6 +598,7 @@ const NAV = [
   { id: "live", label: "Dashboard public", icon: Radio, roles: ["super_admin", "admin", "superviseur", "arbitre", "president", "joueur"] },
   { id: "refunds", label: "Remboursements", icon: Receipt, roles: ["super_admin", "admin", "president"] },
   { id: "search", label: "Recherche", icon: Search, roles: ["super_admin", "admin", "superviseur", "arbitre"] },
+  { id: "cards", label: "Cartes & Licences", icon: Award, roles: ["super_admin", "admin", "superviseur"] },
   { id: "profile", label: "Mon profil", icon: User, roles: ["joueur"] },
 ];
 
@@ -651,6 +701,19 @@ export default function TourneyOS() {
   const [newTeam, setNewTeam] = useState({ name: "", city: "", logo: null, coachName: "", coachPhone: "" });
   const [newAccount, setNewAccount] = useState({ name: "", email: "", username: "", phone: "", role: "arbitre", teamId: "", playerId: "", password: "" });
   const [newEventName, setNewEventName] = useState("");
+  const [configDraft, setConfigDraft] = useState(null); // brouillon local de Configuration, null = pas de modification en attente
+  const [configSaved, setConfigSaved] = useState(false);
+  useEffect(() => { setConfigDraft(null); setConfigSaved(false); }, [managingEventId]);
+  const [cardConfigDraft, setCardConfigDraft] = useState(null);
+  const [cardConfigSaved, setCardConfigSaved] = useState(false);
+  useEffect(() => { setCardConfigDraft(null); setCardConfigSaved(false); }, [managingEventId]);
+  const [selectedCardIds, setSelectedCardIds] = useState({}); // { "cardKey": true }
+  const [printPaper, setPrintPaper] = useState("A4");
+  const [printMargin, setPrintMargin] = useState(10);
+  const [printGap, setPrintGap] = useState(4);
+  const [printingCards, setPrintingCards] = useState(false);
+  const [newOfficial, setNewOfficial] = useState({ teamId: "", name: "", role: "" });
+  const [newMedia, setNewMedia] = useState({ name: "", org: "", role: "" });
   const [eventError, setEventError] = useState("");
   const [publicMode, setPublicMode] = useState(false);
   const [licenseView, setLicenseView] = useState(null); // { team, player }
@@ -716,7 +779,7 @@ export default function TourneyOS() {
 
   const teamById = useMemo(() => Object.fromEntries(teams.map(t => [t.id, t])), [teams]);
   const isFullAdmin = currentUser?.role === "admin" || currentUser?.role === "super_admin";
-  const allowedNav = useMemo(() => currentUser ? NAV.filter(n => n.roles.includes(currentUser.role) || (currentUser.canAuthorize && (n.id === "users" || n.id === "refunds"))) : [], [currentUser]);
+  const allowedNav = useMemo(() => currentUser ? NAV.filter(n => n.roles.includes(currentUser.role) || (currentUser.canAuthorize && (n.id === "users" || n.id === "refunds" || n.id === "cards"))) : [], [currentUser]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -779,7 +842,7 @@ export default function TourneyOS() {
     updateEvent(activeEventId, e => {
       const id = e.teams.length ? Math.max(...e.teams.map(t => t.id)) + 1 : 0;
       const licensePrefix = (e.settings.name || "TMP").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "TMP";
-      const t = { ...makeTeam(id, newTeam.name.trim(), newTeam.city.trim() || "—", licensePrefix), logo: newTeam.logo, coachName: newTeam.coachName.trim(), coachPhone: newTeam.coachPhone.trim() };
+      const t = { ...makeTeam(id, newTeam.name.trim(), newTeam.city.trim() || "—", licensePrefix), logo: newTeam.logo, coachName: newTeam.coachName.trim(), coachPhone: newTeam.coachPhone.trim(), officials: [] };
       if (currentUser.role === "president" && currentUser.teamId === undefined) {
         updateDoc(doc(db, "users", currentUser.id), { teamId: id }).catch(err => console.error("Échec de la mise à jour du profil:", err));
       }
@@ -812,6 +875,44 @@ export default function TourneyOS() {
   }
   function suspendPlayer(teamId, playerId, manuallySuspended) {
     updateEvent(activeEventId, e => ({ ...e, teams: e.teams.map(t => t.id !== teamId ? t : { ...t, players: t.players.map(p => p.id === playerId ? { ...p, manuallySuspended } : p) }) }));
+  }
+
+  /* ---------- officiels (badge par équipe) ---------- */
+  function addOfficial(teamId, name, role) {
+    if (!name?.trim()) return;
+    updateEvent(activeEventId, e => ({
+      ...e,
+      teams: e.teams.map(t => {
+        if (t.id !== teamId) return t;
+        const officials = t.officials || [];
+        const prefix = (e.settings.name || "TMP").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "TMP";
+        const matricule = `${prefix}-OFF-${String(t.id).padStart(2, "0")}-${String(officials.length + 1).padStart(2, "0")}`;
+        return { ...t, officials: [...officials, { id: `${t.id}-off${Date.now()}`, name: name.trim(), role: role?.trim() || "Officiel", photo: null, matricule }] };
+      }),
+    }));
+  }
+  function removeOfficial(teamId, officialId) {
+    updateEvent(activeEventId, e => ({ ...e, teams: e.teams.map(t => t.id !== teamId ? t : { ...t, officials: (t.officials || []).filter(o => o.id !== officialId) }) }));
+  }
+  function updateOfficialField(teamId, officialId, field, value) {
+    updateEvent(activeEventId, e => ({ ...e, teams: e.teams.map(t => t.id !== teamId ? t : { ...t, officials: (t.officials || []).map(o => o.id === officialId ? { ...o, [field]: value } : o) }) }));
+  }
+
+  /* ---------- médias (badges au niveau de l'événement, pas rattachés à une équipe) ---------- */
+  function addMedia(name, org, role) {
+    if (!name?.trim()) return;
+    updateEvent(activeEventId, e => {
+      const media = e.media || [];
+      const prefix = (e.settings.name || "TMP").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "TMP";
+      const matricule = `${prefix}-MED-${String(media.length + 1).padStart(3, "0")}`;
+      return { ...e, media: [...media, { id: `media-${Date.now()}`, name: name.trim(), org: org?.trim() || "", role: role?.trim() || "Presse", photo: null, matricule }] };
+    });
+  }
+  function removeMedia(mediaId) {
+    updateEvent(activeEventId, e => ({ ...e, media: (e.media || []).filter(m => m.id !== mediaId) }));
+  }
+  function updateMediaField(mediaId, field, value) {
+    updateEvent(activeEventId, e => ({ ...e, media: (e.media || []).map(m => m.id === mediaId ? { ...m, [field]: value } : m) }));
   }
 
   /* ---------- accounts ---------- */
@@ -1216,6 +1317,20 @@ export default function TourneyOS() {
   /* ---------- ADMIN VIEWS ---------- */
 
   function SetupView() {
+    const draft = configDraft || settings;
+    function patchDraft(patch) { setConfigDraft({ ...draft, ...patch }); setConfigSaved(false); }
+    function saveConfig() {
+      try {
+        patchSettings(draft);
+        setConfigDraft(null);
+        setConfigSaved(true);
+        setTimeout(() => setConfigSaved(false), 4000);
+      } catch (err) {
+        console.error("Échec de l'enregistrement de la configuration :", err);
+        alert("Erreur : " + (err?.message || err));
+      }
+    }
+    const isDirty = configDraft !== null;
     return (
       <div className="max-w-3xl">
         <SectionTitle eyebrow={`Admin — ${managingEvent.settings.name}`} title="Configuration du tournoi" />
@@ -1224,32 +1339,227 @@ export default function TourneyOS() {
             <CheckCircle2 size={16} />Événement créé ! Règle les paramètres ci-dessous, puis rends-toi dans "Équipes" pour commencer les inscriptions.
           </div>
         )}
+        {configSaved && (
+          <div className="flex items-center gap-2 text-sm font-semibold px-4 py-3 rounded-xl mb-4" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>
+            <CheckCircle2 size={16} />Configuration enregistrée.
+          </div>
+        )}
         <div className="bg-white rounded-2xl border p-6 mb-6" style={{ borderColor: COLORS.line }}>
           <label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1.5">Nom du tournoi</label>
-          <input value={settings.name} onChange={e => patchSettings({ name: e.target.value })} className="w-full border rounded-lg px-3 py-2 text-lg font-bold outline-none focus:ring-2" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+          <input value={draft.name} onChange={e => patchDraft({ name: e.target.value })} className="w-full border rounded-lg px-3 py-2 text-lg font-bold outline-none focus:ring-2" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-5">
-            {NumberField({ label: "Points victoire", value: settings.win, onChange: v => patchSettings({ win: v }) })}
-            {NumberField({ label: "Points nul", value: settings.draw, onChange: v => patchSettings({ draw: v }) })}
-            {NumberField({ label: "Points défaite", value: settings.loss, onChange: v => patchSettings({ loss: v }) })}
+            {NumberField({ label: "Points victoire", value: draft.win, onChange: v => patchDraft({ win: v }) })}
+            {NumberField({ label: "Points nul", value: draft.draw, onChange: v => patchDraft({ draw: v }) })}
+            {NumberField({ label: "Points défaite", value: draft.loss, onChange: v => patchDraft({ loss: v }) })}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
-            {NumberField({ label: "Durée mi-temps (min)", value: settings.halfMinutes, onChange: v => patchSettings({ halfMinutes: v }) })}
-            {NumberField({ label: "Remplacements autorisés", value: settings.subs, onChange: v => patchSettings({ subs: v }) })}
-            {NumberField({ label: "Équipes par poule", value: settings.poolSize, onChange: v => patchSettings({ poolSize: v }) })}
+            {NumberField({ label: "Durée mi-temps (min)", value: draft.halfMinutes, onChange: v => patchDraft({ halfMinutes: v }) })}
+            {NumberField({ label: "Remplacements autorisés", value: draft.subs, onChange: v => patchDraft({ subs: v }) })}
+            {NumberField({ label: "Équipes par poule", value: draft.poolSize, onChange: v => patchDraft({ poolSize: v }) })}
           </div>
         </div>
         <div className="bg-white rounded-2xl border p-6 divide-y" style={{ borderColor: COLORS.line }}>
           <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 pb-2">Activation des fonctionnalités</div>
-          <Toggle checked={settings.showPlayerProfiles} onChange={v => patchSettings({ showPlayerProfiles: v })} label="Profil joueur" hint="Chaque joueur peut consulter ses statistiques et ses prochains matchs." />
-          <Toggle checked={settings.showTopScorers} onChange={v => patchSettings({ showTopScorers: v })} label="Classement des buteurs" hint="Affiche le tableau des meilleurs buteurs/passeurs sur le dashboard public." />
-          <Toggle checked={settings.manualDraw} onChange={v => patchSettings({ manualDraw: v })} label="Tirage manuel" hint="Désactive le tirage automatique au profit d'une répartition manuelle des poules." />
-          <Toggle checked={settings.allowTeamRemovalAfterLaunch} onChange={v => patchSettings({ allowTeamRemovalAfterLaunch: v })} label="Retrait d'équipe après lancement" hint="Si désactivé, une équipe ne peut plus être retirée une fois le tirage au sort effectué." />
-          <Toggle checked={settings.requireTeamLogo} onChange={v => patchSettings({ requireTeamLogo: v })} label="Logo d'équipe obligatoire" hint="Si activé, impossible d'inscrire une équipe sans avoir importé son logo." />
-          <Toggle checked={settings.showScorerPhoto} onChange={v => patchSettings({ showScorerPhoto: v })} label="Photo des buteurs" hint="Affiche la photo du joueur à côté de son nom dans la liste des buteurs de chaque match." />
-          <Toggle checked={settings.showCaptainPhoto} onChange={v => patchSettings({ showCaptainPhoto: v })} label="Photo du capitaine" hint="Affiche la photo du capitaine d'équipe sur les affiches/programmes de match." />
-          <Toggle checked={settings.publicAccess} onChange={v => patchSettings({ publicAccess: v })} label="Accès public (sans connexion)" hint="Si activé, le programme et les statistiques de cet événement sont visibles par le grand public sans se connecter, dès que le tirage est lancé." />
-          <div className="pt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">{NumberField({ label: "Cartons jaunes avant suspension", value: settings.suspensionRule, onChange: v => patchSettings({ suspensionRule: v }) })}{NumberField({ label: "Qualifiés par poule (phase finale)", value: settings.qualifiersPerPool, onChange: v => patchSettings({ qualifiersPerPool: v }) })}</div>
+          <Toggle checked={draft.showPlayerProfiles} onChange={v => patchDraft({ showPlayerProfiles: v })} label="Profil joueur" hint="Chaque joueur peut consulter ses statistiques et ses prochains matchs." />
+          <Toggle checked={draft.showTopScorers} onChange={v => patchDraft({ showTopScorers: v })} label="Classement des buteurs" hint="Affiche le tableau des meilleurs buteurs/passeurs sur le dashboard public." />
+          <Toggle checked={draft.manualDraw} onChange={v => patchDraft({ manualDraw: v })} label="Tirage manuel" hint="Désactive le tirage automatique au profit d'une répartition manuelle des poules." />
+          <Toggle checked={draft.allowTeamRemovalAfterLaunch} onChange={v => patchDraft({ allowTeamRemovalAfterLaunch: v })} label="Retrait d'équipe après lancement" hint="Si désactivé, une équipe ne peut plus être retirée une fois le tirage au sort effectué." />
+          <Toggle checked={draft.requireTeamLogo} onChange={v => patchDraft({ requireTeamLogo: v })} label="Logo d'équipe obligatoire" hint="Si activé, impossible d'inscrire une équipe sans avoir importé son logo." />
+          <Toggle checked={draft.showScorerPhoto} onChange={v => patchDraft({ showScorerPhoto: v })} label="Photo des buteurs" hint="Affiche la photo du joueur à côté de son nom dans la liste des buteurs de chaque match." />
+          <Toggle checked={draft.showCaptainPhoto} onChange={v => patchDraft({ showCaptainPhoto: v })} label="Photo du capitaine" hint="Affiche la photo du capitaine d'équipe sur les affiches/programmes de match." />
+          <Toggle checked={draft.publicAccess} onChange={v => patchDraft({ publicAccess: v })} label="Accès public (sans connexion)" hint="Si activé, le programme et les statistiques de cet événement sont visibles par le grand public sans se connecter, dès que le tirage est lancé." />
+          <div className="pt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">{NumberField({ label: "Cartons jaunes avant suspension", value: draft.suspensionRule, onChange: v => patchDraft({ suspensionRule: v }) })}{NumberField({ label: "Qualifiés par poule (phase finale)", value: draft.qualifiersPerPool, onChange: v => patchDraft({ qualifiersPerPool: v }) })}</div>
         </div>
+        <div className="sticky bottom-4 mt-6 flex justify-end">
+          <button
+            type="button"
+            onClick={saveConfig}
+            disabled={!isDirty}
+            className="px-6 py-3 rounded-xl font-bold text-sm text-white shadow-lg flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: COLORS.turf }}
+          >
+            <CheckCircle2 size={16} />{isDirty ? "Enregistrer les modifications" : "Aucune modification à enregistrer"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function CardsView() {
+    const cardCfg = cardConfigDraft || settings;
+    function patchCardDraft(patch) { setCardConfigDraft({ ...cardCfg, ...patch }); setCardConfigSaved(false); }
+    function saveCardConfig() {
+      try {
+        patchSettings(cardConfigDraft || {});
+        setCardConfigDraft(null);
+        setCardConfigSaved(true);
+        setTimeout(() => setCardConfigSaved(false), 4000);
+      } catch (err) {
+        console.error("Échec de l'enregistrement de la configuration des cartes :", err);
+        alert("Erreur : " + (err?.message || err));
+      }
+    }
+    const cardCfgDirty = cardConfigDraft !== null;
+
+    const allCards = [];
+    teams.forEach(t => {
+      (t.players || []).forEach(p => allCards.push({ key: `player-${t.id}-${p.id}`, kind: "joueur", name: p.name, group: t.name, idValue: p.license, photo: p.photo, headerFallback: `${activeEvent.settings.name} — ${t.name}`, teamId: t.id, entityId: p.id }));
+      (t.officials || []).forEach(o => allCards.push({ key: `official-${t.id}-${o.id}`, kind: "officiel", name: o.name, group: `${t.name} — ${o.role}`, idValue: o.matricule, photo: o.photo, headerFallback: `${activeEvent.settings.name} — ${t.name}`, teamId: t.id, entityId: o.id }));
+    });
+    (activeEvent.media || []).forEach(m => allCards.push({ key: `media-${m.id}`, kind: "media", name: m.name, group: [m.org, m.role].filter(Boolean).join(" — "), idValue: m.matricule, photo: m.photo, headerFallback: `${activeEvent.settings.name} — ${m.org || "Presse"}`, teamId: null, entityId: m.id }));
+
+    const selectedCards = allCards.filter(c => selectedCardIds[c.key]);
+    const selectedCount = selectedCards.length;
+    function toggleCard(key) { setSelectedCardIds(s => ({ ...s, [key]: !s[key] })); }
+    function selectAll() { const next = {}; allCards.forEach(c => { next[c.key] = true; }); setSelectedCardIds(next); }
+    function deselectAll() { setSelectedCardIds({}); }
+
+    const preset = CARD_SIZE_PRESETS[cardCfg.cardSizePreset] || CARD_SIZE_PRESETS["86x54"];
+    const vertical = cardCfg.cardOrientation === "vertical";
+    const cardW = vertical ? Math.min(preset.w, preset.h) : Math.max(preset.w, preset.h);
+    const cardH = vertical ? Math.max(preset.w, preset.h) : Math.min(preset.w, preset.h);
+    const paper = PAPER_SIZES[printPaper];
+    const cols = Math.max(1, Math.floor((paper.w - 2 * printMargin + printGap) / (cardW + printGap)));
+    const rows = Math.max(1, Math.floor((paper.h - 2 * printMargin + printGap) / (cardH + printGap)));
+    const perPage = cols * rows;
+    const validityLabel = cardCfg.cardValidity ? new Date(cardCfg.cardValidity + "T00:00:00").toLocaleDateString("fr-FR") : "";
+
+    return (
+      <div className="max-w-4xl">
+        <SectionTitle eyebrow={ROLE_LABELS[currentUser.role]} title="Cartes & Licences" count={`${allCards.length} profils`} />
+        {cardConfigSaved && (
+          <div className="flex items-center gap-2 text-sm font-semibold px-4 py-3 rounded-xl mb-4" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>
+            <CheckCircle2 size={16} />Configuration des cartes enregistrée.
+          </div>
+        )}
+
+        {/* Configuration visuelle */}
+        <div className="bg-white rounded-2xl border p-6 mb-6" style={{ borderColor: COLORS.line }}>
+          <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-4">Validité et en-tête</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Date de validité</label>
+              <input type="date" value={cardCfg.cardValidity || ""} onChange={e => patchCardDraft({ cardValidity: e.target.value })} className="w-full border rounded-lg px-3 py-2 outline-none" style={{ borderColor: COLORS.line }} /></div>
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">En-tête personnalisé (optionnel)</label>
+              <input value={cardCfg.cardHeader || ""} onChange={e => patchCardDraft({ cardHeader: e.target.value })} placeholder={`${activeEvent.settings.name} — Nom d'équipe`} className="w-full border rounded-lg px-3 py-2 outline-none" style={{ borderColor: COLORS.line }} /></div>
+          </div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-4 pt-2">Mise en page de la carte</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Orientation</label>
+              <select value={cardCfg.cardOrientation} onChange={e => patchCardDraft({ cardOrientation: e.target.value })} className="w-full border rounded-lg px-3 py-2 outline-none bg-white" style={{ borderColor: COLORS.line }}>
+                <option value="horizontal">Horizontal</option><option value="vertical">Vertical</option>
+              </select></div>
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Format</label>
+              <select value={cardCfg.cardSizePreset} onChange={e => patchCardDraft({ cardSizePreset: e.target.value })} className="w-full border rounded-lg px-3 py-2 outline-none bg-white" style={{ borderColor: COLORS.line }}>
+                {Object.entries(CARD_SIZE_PRESETS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select></div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-2">
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Couleur de fond</label>
+              <input type="color" value={cardCfg.cardBg} onChange={e => patchCardDraft({ cardBg: e.target.value })} className="w-full h-9 rounded-lg border cursor-pointer" style={{ borderColor: COLORS.line }} /></div>
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Couleur d'accent / bordure</label>
+              <input type="color" value={cardCfg.cardBorder} onChange={e => patchCardDraft({ cardBorder: e.target.value })} className="w-full h-9 rounded-lg border cursor-pointer" style={{ borderColor: COLORS.line }} /></div>
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Position de la photo</label>
+              <select value={cardCfg.cardPhotoPosition} onChange={e => patchCardDraft({ cardPhotoPosition: e.target.value })} className="w-full border rounded-lg px-3 py-2 outline-none bg-white" style={{ borderColor: COLORS.line }}>
+                <option value="left">Gauche</option><option value="right">Droite</option><option value="center">Centré</option>
+              </select></div>
+          </div>
+          <div className="flex items-center justify-between mt-5 pt-4 border-t" style={{ borderColor: COLORS.line }}>
+            <div className="scale-90 origin-left"><CardFace kind="joueur" name="Aperçu Joueur" subLabel="Équipe exemple" idValue="EX-01-01" photo={null} headerText={(cardCfg.cardHeader || "").trim() || `${activeEvent.settings.name} — Équipe exemple`} validity={validityLabel} cfg={cardCfg} /></div>
+            <button type="button" onClick={saveCardConfig} disabled={!cardCfgDirty} className="px-5 py-2.5 rounded-xl font-bold text-sm text-white flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed" style={{ background: COLORS.turf }}>
+              <CheckCircle2 size={16} />{cardCfgDirty ? "Enregistrer la configuration" : "Aucune modification"}
+            </button>
+          </div>
+        </div>
+
+        {/* Ajout officiel */}
+        <div className="bg-white rounded-2xl border p-6 mb-6" style={{ borderColor: COLORS.line }}>
+          <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-3">Ajouter un officiel (badge d'équipe)</div>
+          <div className="flex flex-wrap gap-3">
+            <select value={newOfficial.teamId} onChange={e => setNewOfficial({ ...newOfficial, teamId: e.target.value })} className="border rounded-lg px-3 py-2 outline-none bg-white flex-1 min-w-[140px]" style={{ borderColor: COLORS.line }}>
+              <option value="">Équipe…</option>
+              {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <input value={newOfficial.name} onChange={e => setNewOfficial({ ...newOfficial, name: e.target.value })} placeholder="Nom complet" className="border rounded-lg px-3 py-2 outline-none flex-1 min-w-[140px]" style={{ borderColor: COLORS.line }} />
+            <input value={newOfficial.role} onChange={e => setNewOfficial({ ...newOfficial, role: e.target.value })} placeholder="Fonction (entraîneur adjoint, kiné...)" className="border rounded-lg px-3 py-2 outline-none flex-1 min-w-[160px]" style={{ borderColor: COLORS.line }} />
+            <button type="button" onClick={() => { if (!newOfficial.teamId || !newOfficial.name.trim()) return; addOfficial(newOfficial.teamId, newOfficial.name, newOfficial.role); setNewOfficial({ teamId: newOfficial.teamId, name: "", role: "" }); }} disabled={!newOfficial.teamId || !newOfficial.name.trim()} className="px-4 py-2 rounded-lg font-semibold text-sm text-white flex items-center gap-1.5 disabled:opacity-40" style={{ background: COLORS.turf }}><Plus size={15} />Ajouter</button>
+          </div>
+        </div>
+
+        {/* Ajout média */}
+        <div className="bg-white rounded-2xl border p-6 mb-6" style={{ borderColor: COLORS.line }}>
+          <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-3">Ajouter un profil média / presse</div>
+          <div className="flex flex-wrap gap-3">
+            <input value={newMedia.name} onChange={e => setNewMedia({ ...newMedia, name: e.target.value })} placeholder="Nom complet" className="border rounded-lg px-3 py-2 outline-none flex-1 min-w-[140px]" style={{ borderColor: COLORS.line }} />
+            <input value={newMedia.org} onChange={e => setNewMedia({ ...newMedia, org: e.target.value })} placeholder="Organisme / média" className="border rounded-lg px-3 py-2 outline-none flex-1 min-w-[140px]" style={{ borderColor: COLORS.line }} />
+            <input value={newMedia.role} onChange={e => setNewMedia({ ...newMedia, role: e.target.value })} placeholder="Rôle (photographe, journaliste...)" className="border rounded-lg px-3 py-2 outline-none flex-1 min-w-[160px]" style={{ borderColor: COLORS.line }} />
+            <button type="button" onClick={() => { if (!newMedia.name.trim()) return; addMedia(newMedia.name, newMedia.org, newMedia.role); setNewMedia({ name: "", org: "", role: "" }); }} disabled={!newMedia.name.trim()} className="px-4 py-2 rounded-lg font-semibold text-sm text-white flex items-center gap-1.5 disabled:opacity-40" style={{ background: COLORS.turf }}><Plus size={15} />Ajouter</button>
+          </div>
+        </div>
+
+        {/* Sélection & impression */}
+        <div className="bg-white rounded-2xl border p-6" style={{ borderColor: COLORS.line }}>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-stone-500">Sélection pour impression ({selectedCount} sélectionné{selectedCount > 1 ? "s" : ""})</div>
+            <div className="flex gap-2">
+              <button type="button" onClick={selectAll} className="text-xs font-semibold px-3 py-1.5 rounded-lg border" style={{ borderColor: COLORS.line, color: COLORS.turf }}>Tout sélectionner</button>
+              <button type="button" onClick={deselectAll} className="text-xs font-semibold px-3 py-1.5 rounded-lg border text-stone-400" style={{ borderColor: COLORS.line }}>Tout désélectionner</button>
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto border rounded-xl divide-y mb-5" style={{ borderColor: COLORS.line }}>
+            {allCards.length === 0 && <div className="p-4 text-sm text-stone-400">Aucun profil (joueur, officiel ou média) pour l'instant.</div>}
+            {allCards.map(c => (
+              <label key={c.key} className="flex items-center gap-3 p-2.5 cursor-pointer hover:bg-stone-50">
+                <input type="checkbox" checked={!!selectedCardIds[c.key]} onChange={() => toggleCard(c.key)} className="shrink-0" />
+                <PlayerAvatar name={c.name} photo={c.photo} size={26} />
+                <div className="flex-1 min-w-0"><div className="text-sm font-medium truncate">{c.name}</div><div className="text-xs text-stone-400 truncate">{c.group}</div></div>
+                <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>{CARD_KIND_LABELS[c.kind]}</span>
+                <span className="font-mono text-xs shrink-0" style={{ color: COLORS.turf }}>{c.idValue || "—"}</span>
+                {c.kind !== "joueur" && (
+                  <>
+                    <span onClick={e => e.stopPropagation()} className="shrink-0">
+                      <input type="file" accept="image/*" className="hidden" id={`photo-${c.key}`} onChange={e => handleLogoFile(e, photo => { if (c.kind === "officiel") updateOfficialField(c.teamId, c.entityId, "photo", photo); else updateMediaField(c.entityId, "photo", photo); })} />
+                      <label htmlFor={`photo-${c.key}`} className="text-stone-300 hover:text-stone-500 cursor-pointer" title="Photo"><Upload size={14} /></label>
+                    </span>
+                    <button type="button" onClick={e => { e.preventDefault(); e.stopPropagation(); if (c.kind === "officiel") removeOfficial(c.teamId, c.entityId); else removeMedia(c.entityId); setSelectedCardIds(s => { const n = { ...s }; delete n[c.key]; return n; }); }} className="text-stone-300 hover:text-red-600 shrink-0" title="Supprimer"><Trash2 size={14} /></button>
+                  </>
+                )}
+              </label>
+            ))}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-4">
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Feuille</label>
+              <select value={printPaper} onChange={e => setPrintPaper(e.target.value)} className="w-full border rounded-lg px-3 py-2 outline-none bg-white" style={{ borderColor: COLORS.line }}>
+                <option value="A4">A4</option><option value="A3">A3</option>
+              </select></div>
+            {NumberField({ label: "Marge (mm)", value: printMargin, onChange: setPrintMargin })}
+            {NumberField({ label: "Espacement (mm)", value: printGap, onChange: setPrintGap })}
+            <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Cartes / page</label>
+              <div className="border rounded-lg px-3 py-2 font-mono font-bold" style={{ borderColor: COLORS.line, color: COLORS.turf }}>{perPage} ({cols}×{rows})</div></div>
+          </div>
+          <button type="button" onClick={() => setPrintingCards(true)} disabled={selectedCount === 0} className="w-full px-4 py-3 rounded-xl font-bold text-sm text-white flex items-center justify-center gap-2 disabled:opacity-40" style={{ background: COLORS.turf }}>
+            <Printer size={16} />Aperçu et impression ({selectedCount})
+          </button>
+          <p className="text-[11px] text-stone-400 mt-2">Dans la boîte de dialogue d'impression du navigateur, choisis le format de feuille ({printPaper}) correspondant pour un rendu fidèle.</p>
+        </div>
+
+        {printingCards && (
+          <div className="fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4 overflow-y-auto" onClick={() => setPrintingCards(false)}>
+            <div className="bg-white rounded-2xl p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4 no-print">
+                <h3 className="font-black text-lg" style={{ color: COLORS.ink, fontFamily: "'Barlow Condensed', sans-serif" }}>Aperçu d'impression — {selectedCount} carte{selectedCount > 1 ? "s" : ""}</h3>
+                <div className="flex gap-2">
+                  <button onClick={() => window.print()} className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: COLORS.turf }}><Printer size={13} />Imprimer</button>
+                  <button onClick={() => setPrintingCards(false)} className="text-stone-400 hover:text-stone-600 text-sm font-semibold">Fermer</button>
+                </div>
+              </div>
+              <div className="print-area" style={{ display: "flex", flexWrap: "wrap", gap: `${printGap}mm`, padding: `${printMargin}mm` }}>
+                {selectedCards.map(c => (
+                  <CardFace key={c.key} kind={c.kind} name={c.name} subLabel={c.group} idValue={c.idValue} photo={c.photo} headerText={(cardCfg.cardHeader || "").trim() || c.headerFallback} validity={validityLabel} cfg={cardCfg} />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -2237,7 +2547,7 @@ export default function TourneyOS() {
     );
   }
 
-  const views = { setup: SetupView, events: EventsView, users: UsersView, teams: TeamsView, coach_match: CoachMatchesView, draw: DrawView, referee: RefereeView, live: PublicDashboardView, refunds: RefundsView, search: SearchView, profile: ProfileView };
+  const views = { setup: SetupView, events: EventsView, users: UsersView, teams: TeamsView, coach_match: CoachMatchesView, draw: DrawView, referee: RefereeView, live: PublicDashboardView, refunds: RefundsView, search: SearchView, profile: ProfileView, cards: CardsView };
   const activeViewId = allowedNav.find(n => n.id === view) ? view : allowedNav[0]?.id;
   const ActiveView = views[activeViewId] || (() => <EmptyState text="Aucun accès disponible pour ce rôle." />);
 
