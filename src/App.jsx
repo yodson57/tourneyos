@@ -179,13 +179,34 @@ function roundRobinPairs(teamIds) {
 function freshMatchState() {
   return { clock: { period: "pre", running: false, baseSeconds: 0, runningSince: null, addedFirst: 0, addedSecond: 0 }, lineups: {}, subRequests: [] };
 }
-function drawPoolsAndMatches(teams, poolSize) {
+function drawPoolsAndMatches(teams, poolSize, strategy = "balance") {
   const shuffled = shuffle(teams.map(t => t.id));
-  const poolNames = ["A", "B", "C", "D", "E"];
-  const nPools = Math.max(1, Math.ceil(shuffled.length / poolSize));
+  const poolNames = ["A", "B", "C", "D", "E", "F", "G", "H"];
   const pools = {};
-  for (let i = 0; i < nPools; i++) pools[poolNames[i]] = [];
-  shuffled.forEach((id, i) => pools[poolNames[i % nPools]].push(id));
+  let leftover = [];
+
+  if (strategy === "waitlist") {
+    // Poules strictement complètes uniquement ; le reliquat part en liste d'attente (non assigné).
+    const nFull = Math.floor(shuffled.length / poolSize);
+    for (let i = 0; i < nFull; i++) pools[poolNames[i]] = shuffled.slice(i * poolSize, (i + 1) * poolSize);
+    leftover = shuffled.slice(nFull * poolSize);
+  } else if (strategy === "newPool") {
+    // Découpage séquentiel strict par paquets de poolSize ; le dernier paquet forme sa propre poule, même réduite.
+    const nPools = Math.max(1, Math.ceil(shuffled.length / poolSize));
+    for (let i = 0; i < nPools; i++) pools[poolNames[i]] = shuffled.slice(i * poolSize, (i + 1) * poolSize);
+  } else {
+    // "balance" (défaut) : répartition round-robin qui équilibre le reliquat sur les poules existantes.
+    const nPools = Math.max(1, Math.ceil(shuffled.length / poolSize));
+    for (let i = 0; i < nPools; i++) pools[poolNames[i]] = [];
+    shuffled.forEach((id, i) => pools[poolNames[i % nPools]].push(id));
+  }
+
+  const matches = poolMatchesFromPools(pools);
+  return { pools, matches, leftover };
+}
+/* (Re)génère les matchs de round-robin pour un ensemble de poules, en repartant du premier créneau —
+   utilisé au tirage initial ET lors d'un réajustement manuel de poule. */
+function poolMatchesFromPools(pools) {
   let slotCursor = 0;
   const matches = [];
   Object.entries(pools).forEach(([poolName, ids]) => {
@@ -198,11 +219,12 @@ function drawPoolsAndMatches(teams, poolSize) {
         clock: { period: "pre", running: false, baseSeconds: 0, runningSince: null, addedFirst: 0, addedSecond: 0 },
         lineups: { [home]: { starters: [], bench: [], validated: false }, [away]: { starters: [], bench: [], validated: false } },
         subRequests: [],
+        slot: slotCursor,
       });
       slotCursor++;
     });
   });
-  return { pools, matches };
+  return matches;
 }
 
 function liveSeconds(clock) {
@@ -699,7 +721,7 @@ export default function TourneyOS() {
   const [dashboardTab, setDashboardTab] = useState("programme");
   const fileRef = useRef(null);
   const [newTeam, setNewTeam] = useState({ name: "", city: "", logo: null, coachName: "", coachPhone: "" });
-  const [newAccount, setNewAccount] = useState({ name: "", email: "", username: "", phone: "", role: "arbitre", teamId: "", playerId: "", password: "" });
+  const [newAccount, setNewAccount] = useState({ name: "", email: "", username: "", phone: "", role: "arbitre", teamId: "", playerId: "", password: "", canAuthorize: false });
   const [newEventName, setNewEventName] = useState("");
   const [configDraft, setConfigDraft] = useState(null); // brouillon local de Configuration, null = pas de modification en attente
   const [configSaved, setConfigSaved] = useState(false);
@@ -714,6 +736,7 @@ export default function TourneyOS() {
   const [printingCards, setPrintingCards] = useState(false);
   const [newOfficial, setNewOfficial] = useState({ teamId: "", name: "", role: "" });
   const [newMedia, setNewMedia] = useState({ name: "", org: "", role: "" });
+  const [drawStrategy, setDrawStrategy] = useState("balance");
   const [eventError, setEventError] = useState("");
   const [publicMode, setPublicMode] = useState(false);
   const [licenseView, setLicenseView] = useState(null); // { team, player }
@@ -774,6 +797,7 @@ export default function TourneyOS() {
   const pools = activeEvent.pools;
   const matches = activeEvent.matches;
   const bracket = activeEvent.bracket;
+  const poolLeftovers = activeEvent.poolLeftovers || [];
   const tournamentLaunched = pools !== null;
 
 
@@ -933,6 +957,7 @@ export default function TourneyOS() {
         ...(EVENT_SCOPED_ROLES.includes(newAccount.role) ? { eventId: eventIdForNew } : {}),
         ...((newAccount.role === "president" || newAccount.role === "joueur") && newAccount.teamId !== "" ? { teamId: Number(newAccount.teamId) } : {}),
         ...(newAccount.role === "joueur" && newAccount.playerId !== "" ? { playerId: newAccount.playerId } : {}),
+        ...((newAccount.role === "superviseur" || newAccount.role === "arbitre") && newAccount.canAuthorize ? { canAuthorize: true } : {}),
       };
       await setDoc(doc(db, "users", uid), profile);
       // Correspondances pour permettre la connexion par nom d'utilisateur / téléphone / ID profil, en plus de l'e-mail
@@ -940,7 +965,7 @@ export default function TourneyOS() {
       if (usernameNorm) await setDoc(doc(db, "loginLookup", usernameNorm), { email: emailNorm });
       if (phoneNorm) await setDoc(doc(db, "loginLookup", phoneNorm), { email: emailNorm });
       setJustCreated({ email: emailNorm, password, username: usernameNorm || null, uid });
-      setNewAccount({ name: "", email: "", username: "", phone: "", role: "arbitre", teamId: "", playerId: "", password: "" });
+      setNewAccount({ name: "", email: "", username: "", phone: "", role: "arbitre", teamId: "", playerId: "", password: "", canAuthorize: false });
     } catch (err) {
       setAccountError(AUTH_ERROR_MESSAGES[err.code] || "Échec de la création du compte.");
     }
@@ -1027,9 +1052,37 @@ export default function TourneyOS() {
   }
 
   /* ---------- draw ---------- */
-  function runDraw() {
-    updateEvent(activeEventId, e => { const { pools, matches } = drawPoolsAndMatches(e.teams, e.settings.poolSize); return { ...e, pools, matches, bracket: null }; });
+  function runDraw(strategy) {
+    updateEvent(activeEventId, e => { const { pools, matches, leftover } = drawPoolsAndMatches(e.teams, e.settings.poolSize, strategy || "balance"); return { ...e, pools, matches, bracket: null, poolLeftovers: leftover }; });
     setView("draw");
+  }
+  /* Déplace une équipe vers une autre poule (ou vers la liste d'attente / une poule vide nouvellement créée),
+     et régénère uniquement les matchs des poules affectées (source et destination). Les résultats déjà
+     enregistrés dans les matchs des AUTRES poules ne sont pas touchés. */
+  function moveTeamToPool(teamId, targetPoolName) {
+    updateEvent(activeEventId, e => {
+      const nextPools = {};
+      Object.entries(e.pools || {}).forEach(([name, ids]) => { nextPools[name] = ids.filter(id => id !== teamId); });
+      let nextLeftover = (e.poolLeftovers || []).filter(id => id !== teamId);
+      if (targetPoolName === "_waitlist") {
+        nextLeftover = [...nextLeftover, teamId];
+      } else {
+        if (!nextPools[targetPoolName]) nextPools[targetPoolName] = [];
+        nextPools[targetPoolName] = [...nextPools[targetPoolName], teamId];
+      }
+      const affectedPools = new Set([...Object.keys(e.pools || {}), targetPoolName].filter(n => n !== "_waitlist"));
+      const untouchedMatches = (e.matches || []).filter(m => !affectedPools.has(m.pool));
+      const regenerated = poolMatchesFromPools(Object.fromEntries(Object.entries(nextPools).filter(([name]) => affectedPools.has(name))));
+      return { ...e, pools: nextPools, poolLeftovers: nextLeftover, matches: [...untouchedMatches, ...regenerated] };
+    });
+  }
+  function addEmptyPool() {
+    updateEvent(activeEventId, e => {
+      const usedLetters = Object.keys(e.pools || {});
+      const nextLetter = ["A", "B", "C", "D", "E", "F", "G", "H"].find(l => !usedLetters.includes(l));
+      if (!nextLetter) return e;
+      return { ...e, pools: { ...e.pools, [nextLetter]: [] } };
+    });
   }
   function manualGenerateBracket() { updateEvent(activeEventId, e => ({ ...e, bracket: generateBracket(e) })); }
 
@@ -1671,6 +1724,12 @@ export default function TourneyOS() {
                   <option value="">—</option>{usersEvent.teams.find(t => t.id === Number(newAccount.teamId))?.players.map(p => <option key={p.id} value={p.id}>#{p.number} {p.name}</option>)}
                 </select></div>
             )}
+            {(newAccount.role === "superviseur" || newAccount.role === "arbitre") && (
+              <label className="flex items-center gap-2 min-w-[170px] text-xs font-semibold cursor-pointer" style={{ color: COLORS.ink }}>
+                <input type="checkbox" checked={newAccount.canAuthorize} onChange={e => setNewAccount({ ...newAccount, canAuthorize: e.target.checked })} />
+                Droits d'ayant droit<span className="block text-[10px] font-normal text-stone-400">(créer des comptes, valider remboursements)</span>
+              </label>
+            )}
             <button
               onClick={() => askSaveConfirm(
                 "Un compte de connexion sera créé pour cette personne.",
@@ -1679,6 +1738,7 @@ export default function TourneyOS() {
                   { label: "E-mail", value: newAccount.email },
                   { label: "Rôle", value: ROLE_LABELS[newAccount.role] },
                   ...(newAccount.teamId !== "" ? [{ label: "Équipe", value: usersEvent.teams.find(t => t.id === Number(newAccount.teamId))?.name }] : []),
+                  ...(newAccount.canAuthorize ? [{ label: "Droits", value: "Ayant droit" }] : []),
                 ],
                 addAccount,
                 "Créer le compte"
@@ -1935,6 +1995,15 @@ export default function TourneyOS() {
   }
 
   function DrawView() {
+    const canManageAll = currentUser.role === "admin" || currentUser.role === "super_admin";
+    const remainder = settings.poolSize > 0 ? teams.length % settings.poolSize : 0;
+    const isUneven = remainder !== 0 && teams.length > settings.poolSize;
+    const STRATEGY_OPTIONS = [
+      { id: "balance", label: "Compléter en répartissant sur les autres poules", hint: "Le reliquat d'équipes est réparti pour équilibrer toutes les poules (comportement par défaut)." },
+      { id: "newPool", label: "Créer une nouvelle poule réduite", hint: "Le reliquat forme sa propre poule, même avec moins d'équipes que les autres." },
+      { id: "waitlist", label: "Mettre le reliquat en liste d'attente", hint: "Seules les poules complètes sont créées ; les équipes en trop restent en attente d'affectation manuelle." },
+    ];
+    const poolOptions = Object.keys(pools || {});
     return (
       <div>
         <SectionTitle eyebrow={`Admin — ${activeEvent.settings.name}`} title="Tirage au sort & calendrier" />
@@ -1942,11 +2011,24 @@ export default function TourneyOS() {
           <div className="bg-white rounded-2xl border p-10 text-center max-w-xl" style={{ borderColor: COLORS.line }}>
             <Trophy size={28} className="mx-auto mb-3" style={{ color: COLORS.amber }} />
             <p className="text-sm text-stone-600 mb-5">{teams.length} équipes inscrites, prêtes pour la répartition en poules de {settings.poolSize} et l'injection automatique dans les créneaux pré-programmés ({SLOTS.length} créneaux disponibles). Une fois lancé, l'événement sera automatiquement publié sur le Dashboard public.</p>
+            {isUneven && (
+              <div className="text-left mb-5 bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-amber-800 mb-2"><AlertTriangle size={13} />{teams.length} équipes ne se divisent pas exactement par {settings.poolSize} — que faire du reliquat ?</div>
+                <div className="space-y-2">
+                  {STRATEGY_OPTIONS.map(opt => (
+                    <label key={opt.id} className="flex items-start gap-2 cursor-pointer">
+                      <input type="radio" name="drawStrategy" checked={drawStrategy === opt.id} onChange={() => setDrawStrategy(opt.id)} className="mt-0.5" />
+                      <span><span className="text-sm font-semibold block" style={{ color: COLORS.ink }}>{opt.label}</span><span className="text-xs text-stone-500">{opt.hint}</span></span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <button
               onClick={() => askSaveConfirm(
                 "Le tirage au sort répartira les équipes en poules et publiera l'événement sur le Dashboard public.",
-                [{ label: "Équipes inscrites", value: `${teams.length}` }, { label: "Équipes par poule", value: `${settings.poolSize}` }],
-                runDraw,
+                [{ label: "Équipes inscrites", value: `${teams.length}` }, { label: "Équipes par poule", value: `${settings.poolSize}` }, ...(isUneven ? [{ label: "Stratégie reliquat", value: STRATEGY_OPTIONS.find(o => o.id === drawStrategy)?.label }] : [])],
+                () => runDraw(drawStrategy),
                 "Lancer le tirage au sort"
               )}
               disabled={teams.length < 2}
@@ -1956,6 +2038,45 @@ export default function TourneyOS() {
         ) : (
           <div className="space-y-8">
             <div className="flex items-center gap-2 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2"><CheckCircle2 size={13} />Cet événement est publié sur le Dashboard public.</div>
+
+            {canManageAll && (
+              <div className="bg-white rounded-2xl border p-5" style={{ borderColor: COLORS.line }}>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-stone-500">Ajuster les poules manuellement</div>
+                  <button type="button" onClick={addEmptyPool} className="text-xs font-semibold px-3 py-1.5 rounded-lg border flex items-center gap-1.5" style={{ borderColor: COLORS.line, color: COLORS.turf }}><Plus size={13} />Nouvelle poule vide</button>
+                </div>
+                <p className="text-[11px] text-stone-400 mb-3">Déplacer une équipe régénère le calendrier de la poule d'origine et de la poule de destination (les résultats déjà enregistrés dans ces poules seront réinitialisés).</p>
+                <div className="space-y-2">
+                  {poolOptions.map(poolName => (pools[poolName] || []).map(id => teamById[id] && (
+                    <div key={id} className="flex items-center gap-2 text-sm p-2 rounded-lg border" style={{ borderColor: COLORS.line }}>
+                      <span className="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold text-white shrink-0" style={{ background: COLORS.turf }}>{poolName}</span>
+                      <span className="flex-1 min-w-0 truncate">{teamById[id].name}</span>
+                      <select value={poolName} onChange={e => e.target.value !== poolName && moveTeamToPool(id, e.target.value)} className="text-xs border rounded-lg px-2 py-1.5 outline-none bg-white" style={{ borderColor: COLORS.line }}>
+                        {poolOptions.map(p => <option key={p} value={p}>Poule {p}</option>)}
+                        <option value="_waitlist">Liste d'attente</option>
+                      </select>
+                    </div>
+                  )))}
+                </div>
+                {poolLeftovers.length > 0 && (
+                  <div className="mt-4 pt-4 border-t" style={{ borderColor: COLORS.line }}>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-amber-700 mb-2">Liste d'attente ({poolLeftovers.length})</div>
+                    <div className="space-y-2">
+                      {poolLeftovers.map(id => teamById[id] && (
+                        <div key={id} className="flex items-center gap-2 text-sm p-2 rounded-lg border border-amber-200 bg-amber-50">
+                          <span className="flex-1 min-w-0 truncate">{teamById[id].name}</span>
+                          <select value="" onChange={e => e.target.value && moveTeamToPool(id, e.target.value)} className="text-xs border rounded-lg px-2 py-1.5 outline-none bg-white" style={{ borderColor: COLORS.line }}>
+                            <option value="">Assigner à…</option>
+                            {poolOptions.map(p => <option key={p} value={p}>Poule {p}</option>)}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {Object.entries(pools).map(([poolName, ids]) => (
               <div key={poolName}>
                 <div className="flex items-center gap-2 mb-3"><span className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: COLORS.turf }}>{poolName}</span><span className="font-bold" style={{ color: COLORS.ink }}>Poule {poolName}</span><span className="text-xs text-stone-400">{ids.filter(id => teamById[id]).map(id => teamById[id].name).join(" · ")}</span></div>
