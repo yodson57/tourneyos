@@ -802,6 +802,16 @@ export default function TourneyOS() {
 
   const teamById = useMemo(() => Object.fromEntries(teams.map(t => [t.id, t])), [teams]);
   const isFullAdmin = currentUser?.role === "admin" || currentUser?.role === "super_admin";
+  /* Isolation multi-comités : un Administrateur d'événement (organisateur) ne voit et ne gère que
+     les événements QU'IL a créés — jamais ceux d'un autre comité d'organisation. Seul le
+     Super-Administrateur a une vue et un droit de regard sur l'ensemble du système. */
+  const myEvents = useMemo(() => {
+    if (!currentUser) return [];
+    if (currentUser.role === "super_admin") return events;
+    if (currentUser.role === "admin") return events.filter(e => e.createdBy === currentUser.id);
+    return events;
+  }, [events, currentUser]);
+  const myEventIds = useMemo(() => new Set(myEvents.map(e => e.id)), [myEvents]);
   const allowedNav = useMemo(() => {
     if (!currentUser) return [];
     const canAuthorizeExtras = ["users", "refunds", "cards", "setup", "teams"];
@@ -1030,7 +1040,7 @@ export default function TourneyOS() {
     setEventError("");
     try {
       const ref = doc(collection(db, "events"));
-      await setDoc(ref, { settings: defaultSettings(name), teams: [], pools: null, matches: [], refundRequests: [], bracket: null, pinned: false });
+      await setDoc(ref, { settings: defaultSettings(name), teams: [], pools: null, matches: [], refundRequests: [], bracket: null, pinned: false, createdBy: currentUser.id, createdByName: currentUser.name });
       setManagingEventId(ref.id);
       setNewEventName("");
       setView("setup");
@@ -1626,10 +1636,10 @@ export default function TourneyOS() {
   }
 
   function EventsView() {
-    const sorted = [...events].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+    const sorted = [...myEvents].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
     return (
       <div className="max-w-2xl">
-        <SectionTitle eyebrow={ROLE_LABELS[currentUser.role]} title="Mes événements" count={`${events.length} événements`} />
+        <SectionTitle eyebrow={ROLE_LABELS[currentUser.role]} title="Mes événements" count={`${myEvents.length} événements`} />
         <p className="text-xs text-stone-400 -mt-2 mb-4">Chaque événement est un espace de gestion indépendant (équipes, joueurs, utilisateurs, cartes, tirage...). Ouvre un événement ci-dessous pour y entrer.</p>
         {eventsListenerError && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">Impossible de charger les événements : {eventsListenerError}</p>}
         {eventError && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">{eventError}</p>}
@@ -1658,7 +1668,7 @@ export default function TourneyOS() {
               <div key={ev.id} className="w-full flex items-center justify-between bg-white rounded-xl border p-4" style={{ borderColor: active ? COLORS.turf : COLORS.line, boxShadow: active ? `0 0 0 1px ${COLORS.turf}` : "none" }}>
                 <button onClick={() => { setManagingEventId(ev.id); setView("setup"); }} className="flex-1 text-left flex items-center gap-2 min-w-0">
                   {ev.pinned && <Star size={14} fill={COLORS.amber} style={{ color: COLORS.amber }} className="shrink-0" />}
-                  <div className="min-w-0"><div className="font-bold truncate flex items-center gap-1.5" style={{ color: COLORS.ink }}>{ev.settings.name}{ev.suspended && <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-100 text-red-700">Suspendu</span>}</div><div className="text-xs text-stone-500">{ev.teams.length} équipes · {ev.matches.length} matchs programmés</div></div>
+                  <div className="min-w-0"><div className="font-bold truncate flex items-center gap-1.5" style={{ color: COLORS.ink }}>{ev.settings.name}{ev.suspended && <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-100 text-red-700">Suspendu</span>}</div><div className="text-xs text-stone-500">{ev.teams.length} équipes · {ev.matches.length} matchs programmés{currentUser.role === "super_admin" && ev.createdByName ? ` · Organisateur : ${ev.createdByName}` : ""}</div></div>
                 </button>
                 <div className="flex items-center gap-3 shrink-0">
                   <button onClick={() => togglePinEvent(ev.id, ev.pinned)} title={ev.pinned ? "Désépingler" : "Épingler en première position"} className="text-stone-300 hover:text-amber-500" style={ev.pinned ? { color: COLORS.amber } : {}}>
@@ -1683,10 +1693,18 @@ export default function TourneyOS() {
 
   function UsersView() {
     const usersEvent = isFullAdmin ? managingEvent : activeEvent;
-    const visibleAccounts = isFullAdmin ? accounts : accounts.filter(a => a.eventId === activeEventId && (a.role === "president" || a.role === "joueur"));
-    const roleOptions = isFullAdmin
-      ? Object.entries(ROLE_LABELS).filter(([k]) => k !== "super_admin" || currentUser.role === "super_admin")
-      : [["president", ROLE_LABELS.president], ["joueur", ROLE_LABELS.joueur]];
+    const visibleAccounts = currentUser.role === "super_admin"
+      ? accounts
+      : currentUser.role === "admin"
+        ? accounts.filter(a => myEventIds.has(a.eventId))
+        : accounts.filter(a => a.eventId === activeEventId && (a.role === "president" || a.role === "joueur"));
+    // Seul le Super-Administrateur peut créer un autre compte "Administrateur d'événement" (organisateur) —
+    // un Administrateur d'événement ne peut créer que le staff (superviseur, arbitre, président, joueur) de SON événement.
+    const roleOptions = currentUser.role === "super_admin"
+      ? Object.entries(ROLE_LABELS)
+      : isFullAdmin
+        ? Object.entries(ROLE_LABELS).filter(([k]) => k !== "super_admin" && k !== "admin")
+        : [["president", ROLE_LABELS.president], ["joueur", ROLE_LABELS.joueur]];
 
     function onRoleFieldChange(role) {
       setNewAccount({ ...newAccount, role, teamId: "", playerId: "" });
