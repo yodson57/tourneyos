@@ -103,7 +103,7 @@ function defaultSettings(name) {
   return {
     name, win: 3, draw: 1, loss: 0, halfMinutes: 25, subs: 5, poolSize: 4,
     showPlayerProfiles: true, showTopScorers: true, manualDraw: false,
-    suspensionRule: 2, allowTeamRemovalAfterLaunch: false, qualifiersPerPool: 2,
+    suspensionRule: 2, suspensionMatches: 1, allowTeamRemovalAfterLaunch: false, qualifiersPerPool: 2,
     requireTeamLogo: false, showScorerPhoto: true, showCaptainPhoto: true, publicAccess: true,
     cardValidity: "", cardHeader: "", cardOrientation: "horizontal", cardSizePreset: "86x54",
     cardBg: "#FFFFFF", cardBorder: "#1F6E43", cardPhotoPosition: "left",
@@ -214,7 +214,7 @@ function poolMatchesFromPools(pools) {
       const slot = SLOTS[slotCursor % SLOTS.length];
       matches.push({
         id: `${poolName}-${home}-${away}`, pool: poolName, home, away,
-        field: slot.field, time: slot.time, status: "scheduled",
+        field: slot.field, time: slot.time, date: "", status: "scheduled", postponed: false, forfeitedBy: null,
         homeScore: 0, awayScore: 0, events: [],
         clock: { period: "pre", running: false, baseSeconds: 0, runningSince: null, addedFirst: 0, addedSecond: 0 },
         lineups: { [home]: { starters: [], bench: [], validated: false }, [away]: { starters: [], bench: [], validated: false } },
@@ -364,15 +364,28 @@ function computeTopScorersForEvent(ev) {
   return Object.values(tally).sort((a, b) => b.goals - a.goals).slice(0, 8);
 }
 function computeSuspendedForEvent(ev) {
+  const suspensionMatches = ev.settings.suspensionMatches || 1;
+  const sortedMatches = [...ev.matches].sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
   const yellows = {};
-  const out = [];
-  ev.matches.forEach(m => (m.events || []).forEach(e => {
+  const triggers = {}; // playerId -> { atSlot, teamId, playerName, reason }
+  sortedMatches.forEach(m => (m.events || []).forEach(e => {
     if (e.type === "yellow") {
       yellows[e.playerId] = (yellows[e.playerId] || 0) + 1;
-      if (yellows[e.playerId] === ev.settings.suspensionRule) out.push({ playerId: e.playerId, playerName: e.playerName, teamId: e.teamId, reason: `${ev.settings.suspensionRule} cartons jaunes` });
+      if (yellows[e.playerId] === ev.settings.suspensionRule) {
+        triggers[e.playerId] = { atSlot: m.slot ?? 0, teamId: e.teamId, playerName: e.playerName, reason: `${ev.settings.suspensionRule} cartons jaunes` };
+      }
     }
-    if (e.type === "red") out.push({ playerId: e.playerId, playerName: e.playerName, teamId: e.teamId, reason: e.auto ? "2e carton jaune (expulsion)" : "carton rouge" });
+    if (e.type === "red") {
+      triggers[e.playerId] = { atSlot: m.slot ?? 0, teamId: e.teamId, playerName: e.playerName, reason: e.auto ? "2e carton jaune (expulsion)" : "carton rouge" };
+    }
   }));
+  const out = [];
+  Object.entries(triggers).forEach(([playerId, t]) => {
+    const teamMatchesAfter = sortedMatches.filter(m => (m.home === t.teamId || m.away === t.teamId) && (m.slot ?? 0) > t.atSlot);
+    const toServe = teamMatchesAfter.slice(0, suspensionMatches);
+    const served = toServe.filter(m => m.status === "done").length;
+    if (served < suspensionMatches) out.push({ playerId, playerName: t.playerName, teamId: t.teamId, reason: t.reason, matchesRemaining: suspensionMatches - served });
+  });
   return out;
 }
 
@@ -613,7 +626,7 @@ const NAV = [
   { id: "setup", label: "Configuration", icon: Settings, roles: ["super_admin", "admin"] },
   { id: "events", label: "Mes événements", icon: Layers, roles: ["super_admin", "admin"] },
   { id: "users", label: "Utilisateurs & rôles", icon: Users, roles: ["super_admin", "admin"] },
-  { id: "teams", label: "Équipes", icon: Shield, roles: ["super_admin", "admin", "president"] },
+  { id: "teams", label: "Équipes", icon: Shield, roles: ["super_admin", "admin", "president", "superviseur", "arbitre"] },
   { id: "coach_match", label: "Mes matchs", icon: ClipboardList, roles: ["president"] },
   { id: "draw", label: "Tirage & Calendrier", icon: Calendar, roles: ["super_admin", "admin", "superviseur"] },
   { id: "referee", label: "Feuille de match", icon: Shield, roles: ["super_admin", "admin", "superviseur", "arbitre"] },
@@ -737,6 +750,9 @@ export default function TourneyOS() {
   const [newOfficial, setNewOfficial] = useState({ teamId: "", name: "", role: "" });
   const [newMedia, setNewMedia] = useState({ name: "", org: "", role: "" });
   const [drawStrategy, setDrawStrategy] = useState("balance");
+  const [manageTeamId, setManageTeamId] = useState(null);
+  useEffect(() => { setManageTeamId(null); }, [activeEventId]);
+  const [teamsPosterMode, setTeamsPosterMode] = useState(null); // null | nom de poule | 'all'
   const [eventError, setEventError] = useState("");
   const [publicMode, setPublicMode] = useState(false);
   const [licenseView, setLicenseView] = useState(null); // { team, player }
@@ -1104,6 +1120,28 @@ export default function TourneyOS() {
   }
   function manualGenerateBracket() { updateEvent(activeEventId, e => ({ ...e, bracket: generateBracket(e) })); }
 
+  /* ---------- report & forfait ---------- */
+  function setMatchDate(matchId, date, time) {
+    updateEvent(activeEventId, e => ({ ...e, matches: e.matches.map(m => m.id !== matchId ? m : { ...m, date, ...(time ? { time } : {}) }) }));
+  }
+  function postponeMatch(matchId, newDate, newTime) {
+    if (!newDate) return;
+    updateEvent(activeEventId, e => ({ ...e, matches: e.matches.map(m => m.id !== matchId ? m : { ...m, date: newDate, time: newTime || m.time, postponed: true, status: "scheduled" }) }));
+  }
+  function togglePostponed(matchId) {
+    updateEvent(activeEventId, e => ({ ...e, matches: e.matches.map(m => m.id !== matchId ? m : { ...m, postponed: !m.postponed }) }));
+  }
+  function declareForfeit(matchId, forfeitingTeamId) {
+    updateEvent(activeEventId, e => ({
+      ...e,
+      matches: e.matches.map(m => {
+        if (m.id !== matchId) return m;
+        const winnerIsHome = forfeitingTeamId === m.away;
+        return { ...m, status: "done", forfeitedBy: forfeitingTeamId, homeScore: winnerIsHome ? 3 : 0, awayScore: winnerIsHome ? 0 : 3, clock: { ...m.clock, period: "done", running: false } };
+      }),
+    }));
+  }
+
   /* ---------- match clock & lifecycle ---------- */
   function kickoff(matchId) { updateMatch(matchId, m => ({ ...m, status: "live", clock: { ...m.clock, period: "first", running: true, baseSeconds: 0, runningSince: Date.now() } })); }
   function toggleClock(matchId) {
@@ -1174,7 +1212,8 @@ export default function TourneyOS() {
       <button onClick={onClick} className="w-full text-left bg-white rounded-xl border overflow-hidden hover:shadow-md transition-shadow" style={{ borderColor: COLORS.line }}>
         <div className="flex items-center justify-between px-4 pt-3">
           <span className="text-[11px] font-semibold tracking-widest uppercase" style={{ color: COLORS.turf }}>{m.pool ? `Poule ${m.pool}` : (m.roundLabel || "Phase finale")}</span>
-          {live ? (
+          {m.forfeitedBy ? <span className="text-[11px] font-bold uppercase text-red-600">Forfait</span>
+          : live ? (
             <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase" style={{ color: COLORS.amber }}>
               <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ background: COLORS.amber }} />
@@ -1202,9 +1241,11 @@ export default function TourneyOS() {
             </div>
           </div>
         )}
-        <div className="px-4 pb-3 flex items-center gap-3 text-[12px] text-stone-500">
+        <div className="px-4 pb-3 flex items-center gap-3 text-[12px] text-stone-500 flex-wrap">
           <span className="flex items-center gap-1"><MapPin size={12} />{m.field}</span>
+          {m.date && <span className="flex items-center gap-1"><Calendar size={12} />{new Date(m.date + "T00:00:00").toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })}</span>}
           <span className="flex items-center gap-1"><Clock size={12} />{m.time}</span>
+          {m.postponed && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">Reportée</span>}
         </div>
       </button>
     );
@@ -1246,30 +1287,71 @@ export default function TourneyOS() {
     );
   }
 
-  function PrintableSchedule({ ev, teamById: tb }) {
+  function PrintableSchedule({ ev, teamById: tb, onlyPool }) {
+    const poolEntries = Object.entries(ev.pools || {}).filter(([name]) => !onlyPool || name === onlyPool);
     return (
       <div style={{ fontFamily: "'Inter', sans-serif", color: "#111" }}>
         <h1 style={{ fontSize: 22, fontWeight: 900, marginBottom: 2 }}>{ev.settings.name}</h1>
-        <p style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>Calendrier officiel — {ev.matches.length} match(s) de poule{ev.bracket ? " + phase finale" : ""}</p>
-        {Object.entries(ev.pools || {}).map(([poolName, ids]) => (
+        <p style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>Programme officiel{onlyPool ? ` — Poule ${onlyPool}` : ""} — {ev.matches.filter(m => !onlyPool || m.pool === onlyPool).length} match(s){!onlyPool && ev.bracket ? " + phase finale" : ""}</p>
+        {poolEntries.map(([poolName, ids]) => (
           <div key={poolName} style={{ marginBottom: 18 }}>
             <h2 style={{ fontSize: 14, fontWeight: 800, marginBottom: 6, textTransform: "uppercase" }}>Poule {poolName} — {ids.filter(id => tb[id]).map(id => tb[id].name).join(", ")}</h2>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead><tr style={{ borderBottom: "2px solid #111" }}><th style={{ textAlign: "left", padding: "4px 6px" }}>Heure</th><th style={{ textAlign: "left", padding: "4px 6px" }}>Terrain</th><th style={{ textAlign: "left", padding: "4px 6px" }}>Rencontre</th><th style={{ textAlign: "center", padding: "4px 6px" }}>Score</th></tr></thead>
+              <thead><tr style={{ borderBottom: "2px solid #111" }}><th style={{ textAlign: "left", padding: "4px 6px" }}>Date</th><th style={{ textAlign: "left", padding: "4px 6px" }}>Heure</th><th style={{ textAlign: "left", padding: "4px 6px" }}>Terrain</th><th style={{ textAlign: "left", padding: "4px 6px" }}>Rencontre</th><th style={{ textAlign: "center", padding: "4px 6px" }}>Score</th></tr></thead>
               <tbody>
-                {ev.matches.filter(m => m.pool === poolName).map(m => (
+                {ev.matches.filter(m => m.pool === poolName).sort((a, b) => (a.date || "9999").localeCompare(b.date || "9999") || (a.slot ?? 0) - (b.slot ?? 0)).map(m => (
                   <tr key={m.id} style={{ borderBottom: "1px solid #ddd" }}>
+                    <td style={{ padding: "4px 6px" }}>{m.date ? new Date(m.date + "T00:00:00").toLocaleDateString("fr-FR") : "—"}{m.postponed && <span style={{ color: "#b45309", fontWeight: 700 }}> (reportée)</span>}</td>
                     <td style={{ padding: "4px 6px" }}>{m.time}</td>
                     <td style={{ padding: "4px 6px" }}>{m.field}</td>
                     <td style={{ padding: "4px 6px" }}>{tb[m.home]?.name} vs {tb[m.away]?.name}</td>
-                    <td style={{ padding: "4px 6px", textAlign: "center" }}>{m.status === "done" ? `${m.homeScore} – ${m.awayScore}` : "—"}</td>
+                    <td style={{ padding: "4px 6px", textAlign: "center" }}>{m.forfeitedBy ? "Forfait" : m.status === "done" ? `${m.homeScore} – ${m.awayScore}` : "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         ))}
-        {ev.bracket && <PrintableBracket bracket={ev.bracket} teamById={tb} eventName={null} />}
+        {!onlyPool && ev.bracket && <PrintableBracket bracket={ev.bracket} teamById={tb} eventName={null} />}
+      </div>
+    );
+  }
+
+  /* Affiche de rencontre individuelle (A vs B) — logos, date/heure/terrain, photo du capitaine
+     si le réglage showCaptainPhoto de l'événement l'autorise. */
+  function MatchPoster({ ev, m, teamById: tb }) {
+    const home = tb[m.home], away = tb[m.away];
+    if (!home || !away) return null;
+    const showCaptain = ev.settings.showCaptainPhoto;
+    const captainOf = t => t.players.find(p => p.id === t.captainId);
+    return (
+      <div style={{ fontFamily: "'Inter', sans-serif", width: 500, background: "#fff", border: `3px solid ${COLORS.pitch}`, borderRadius: 10, overflow: "hidden" }}>
+        <div style={{ background: COLORS.pitch, color: "#fff", padding: "12px 18px", textAlign: "center" }}>
+          <div style={{ fontWeight: 900, fontSize: 18, fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: 0.5 }}>{ev.settings.name}</div>
+          <div style={{ fontSize: 10, opacity: 0.75, textTransform: "uppercase", letterSpacing: 1 }}>{m.pool ? `Poule ${m.pool}` : (m.roundLabel || "Phase finale")}</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", padding: "24px 16px" }}>
+          {[home, away].map((t, i) => (
+            <React.Fragment key={t.id}>
+              {i === 1 && <div style={{ fontSize: 26, fontWeight: 900, color: COLORS.amber }}>VS</div>}
+              <div style={{ textAlign: "center", width: 170 }}>
+                {t.logo ? <img src={t.logo} alt="" style={{ width: 64, height: 64, borderRadius: 12, objectFit: "cover", margin: "0 auto" }} /> : <div style={{ width: 64, height: 64, borderRadius: 12, background: COLORS.turf, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, fontSize: 20, margin: "0 auto" }}>{t.name.slice(0, 2).toUpperCase()}</div>}
+                <div style={{ fontWeight: 800, fontSize: 14, marginTop: 6, color: COLORS.ink }}>{t.name}</div>
+                {showCaptain && captainOf(t) && (
+                  <div style={{ fontSize: 10, color: "#8a8a80", marginTop: 4, display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
+                    <PlayerAvatar name={captainOf(t).name} photo={captainOf(t).photo} size={18} />Cap. {captainOf(t).name}
+                  </div>
+                )}
+              </div>
+            </React.Fragment>
+          ))}
+        </div>
+        <div style={{ background: "#F5F1E8", padding: "10px 18px", display: "flex", justifyContent: "space-around", fontSize: 11, color: "#6b6b60" }}>
+          <span>{m.date ? new Date(m.date + "T00:00:00").toLocaleDateString("fr-FR", { weekday: "long", day: "2-digit", month: "long" }) : "Date à confirmer"}</span>
+          <span>{m.time}</span>
+          <span>{m.field}</span>
+        </div>
+        {m.postponed && <div style={{ textAlign: "center", padding: "4px", fontSize: 10, fontWeight: 800, color: "#b45309", background: "#FEF3C7" }}>RENCONTRE REPORTÉE — NOUVELLE DATE CI-DESSUS</div>}
       </div>
     );
   }
@@ -1439,7 +1521,7 @@ export default function TourneyOS() {
           <Toggle checked={draft.showScorerPhoto} onChange={v => patchDraft({ showScorerPhoto: v })} label="Photo des buteurs" hint="Affiche la photo du joueur à côté de son nom dans la liste des buteurs de chaque match." />
           <Toggle checked={draft.showCaptainPhoto} onChange={v => patchDraft({ showCaptainPhoto: v })} label="Photo du capitaine" hint="Affiche la photo du capitaine d'équipe sur les affiches/programmes de match." />
           <Toggle checked={draft.publicAccess} onChange={v => patchDraft({ publicAccess: v })} label="Accès public (sans connexion)" hint="Si activé, le programme et les statistiques de cet événement sont visibles par le grand public sans se connecter, dès que le tirage est lancé." />
-          <div className="pt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">{NumberField({ label: "Cartons jaunes avant suspension", value: draft.suspensionRule, onChange: v => patchDraft({ suspensionRule: v }) })}{NumberField({ label: "Qualifiés par poule (phase finale)", value: draft.qualifiersPerPool, onChange: v => patchDraft({ qualifiersPerPool: v }) })}</div>
+          <div className="pt-3 grid grid-cols-1 sm:grid-cols-3 gap-4">{NumberField({ label: "Cartons jaunes avant suspension", value: draft.suspensionRule, onChange: v => patchDraft({ suspensionRule: v }) })}{NumberField({ label: "Nombre de matchs de suspension", value: draft.suspensionMatches, onChange: v => patchDraft({ suspensionMatches: v }) })}{NumberField({ label: "Qualifiés par poule (phase finale)", value: draft.qualifiersPerPool, onChange: v => patchDraft({ qualifiersPerPool: v }) })}</div>
         </div>
         <div className="sticky bottom-4 mt-6 flex justify-end">
           <button
@@ -1929,7 +2011,9 @@ export default function TourneyOS() {
   function TeamsView() {
     const isPresident = currentUser.role === "president";
     const canManageAll = currentUser.role === "admin" || currentUser.role === "super_admin";
+    const canManageRosters = canManageAll || currentUser.role === "superviseur" || currentUser.role === "arbitre";
     const myTeam = isPresident ? teamById[currentUser.teamId] : null;
+    const manageTeam = isPresident ? myTeam : (canManageRosters ? teamById[manageTeamId] : null);
 
     if (isPresident && !myTeam) {
       return (
@@ -1961,6 +2045,7 @@ export default function TourneyOS() {
                 <div className="text-xs text-stone-500 truncate">{t.city} · {t.players.length} joueurs</div>
                 {t.coachName && <div className="text-xs text-stone-400 truncate flex items-center gap-1"><User size={11} />{t.coachName}{t.coachPhone && <span className="flex items-center gap-0.5 ml-1"><Phone size={11} />{t.coachPhone}</span>}</div>}
                 <button onClick={() => setTeamLicensesView(t)} className="text-[10px] font-mono mt-1 px-1.5 py-0.5 rounded" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>{t.players.length} licences →</button>
+                {canManageRosters && <button onClick={() => setManageTeamId(manageTeamId === t.id ? null : t.id)} className="text-[10px] font-semibold mt-1 ml-1 px-1.5 py-0.5 rounded" style={{ background: manageTeamId === t.id ? COLORS.turf : "rgba(0,0,0,0.05)", color: manageTeamId === t.id ? "#fff" : "#78716c" }}>{manageTeamId === t.id ? "Effectif ouvert ▾" : "Gérer l'effectif →"}</button>}
               </div>
               {canManageAll && (
                 <div className="flex items-center gap-1 shrink-0">
@@ -1971,10 +2056,10 @@ export default function TourneyOS() {
             </div>
           ))}
         </div>
-        {isPresident && myTeam && (
-          <div className="bg-white rounded-2xl border p-5" style={{ borderColor: COLORS.line }}>
+        {manageTeam && (
+          <div className="bg-white rounded-2xl border p-5 mb-6" style={{ borderColor: COLORS.line }}>
             <div className="flex items-center justify-between mb-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-stone-500">Effectif ({myTeam.players.length})</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-stone-500">Effectif — {manageTeam.name} ({manageTeam.players.length})</div>
               <span className="text-[10px] text-stone-400">Étoile = capitaine · clique le numéro de licence pour voir la carte</span>
             </div>
             <div className="overflow-x-auto">
@@ -1985,35 +2070,54 @@ export default function TourneyOS() {
                   </tr>
                 </thead>
                 <tbody>
-                  {myTeam.players.map(p => (
+                  {manageTeam.players.map(p => (
                     <tr key={p.id} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                       <td className="py-1.5 px-2">
                         <div className="flex items-center gap-2">
                           <label className="cursor-pointer shrink-0">
                             <PlayerAvatar name={p.name} photo={p.photo} size={30} />
-                            <input type="file" accept="image/*" className="hidden" onChange={e => handleLogoFile(e, photo => updatePlayerPhoto(myTeam.id, p.id, photo))} />
+                            <input type="file" accept="image/*" className="hidden" onChange={e => handleLogoFile(e, photo => updatePlayerPhoto(manageTeam.id, p.id, photo))} />
                           </label>
-                          <input value={p.name} onChange={e => updatePlayerField(myTeam.id, p.id, "name", e.target.value)} className="text-sm font-medium border-b border-transparent hover:border-stone-200 outline-none bg-transparent min-w-0 w-24" />
+                          <input value={p.name} onChange={e => updatePlayerField(manageTeam.id, p.id, "name", e.target.value)} className="text-sm font-medium border-b border-transparent hover:border-stone-200 outline-none bg-transparent min-w-0 w-24" />
                           <span className="text-xs text-stone-400 shrink-0">#{p.number}</span>
                         </div>
                       </td>
-                      <td className="px-2"><input type="number" value={p.weight ?? ""} onChange={e => updatePlayerField(myTeam.id, p.id, "weight", e.target.value ? Number(e.target.value) : null)} placeholder="—" className="w-16 border rounded px-1.5 py-1 text-xs text-center" style={{ borderColor: COLORS.line }} /></td>
-                      <td className="px-2"><input type="number" value={p.height ?? ""} onChange={e => updatePlayerField(myTeam.id, p.id, "height", e.target.value ? Number(e.target.value) : null)} placeholder="—" className="w-16 border rounded px-1.5 py-1 text-xs text-center" style={{ borderColor: COLORS.line }} /></td>
+                      <td className="px-2"><input type="number" value={p.weight ?? ""} onChange={e => updatePlayerField(manageTeam.id, p.id, "weight", e.target.value ? Number(e.target.value) : null)} placeholder="—" className="w-16 border rounded px-1.5 py-1 text-xs text-center" style={{ borderColor: COLORS.line }} /></td>
+                      <td className="px-2"><input type="number" value={p.height ?? ""} onChange={e => updatePlayerField(manageTeam.id, p.id, "height", e.target.value ? Number(e.target.value) : null)} placeholder="—" className="w-16 border rounded px-1.5 py-1 text-xs text-center" style={{ borderColor: COLORS.line }} /></td>
                       <td className="px-2 text-center">
-                        <button onClick={() => setCaptain(myTeam.id, myTeam.captainId === p.id ? null : p.id)} title="Désigner comme capitaine">
-                          <Star size={15} fill={myTeam.captainId === p.id ? COLORS.amber : "none"} style={{ color: myTeam.captainId === p.id ? COLORS.amber : "#d6d0c0" }} />
+                        <button onClick={() => setCaptain(manageTeam.id, manageTeam.captainId === p.id ? null : p.id)} title="Désigner comme capitaine">
+                          <Star size={15} fill={manageTeam.captainId === p.id ? COLORS.amber : "none"} style={{ color: manageTeam.captainId === p.id ? COLORS.amber : "#d6d0c0" }} />
                         </button>
                       </td>
                       <td className="px-2">
                         <div className="flex items-center gap-1">
-                          <button onClick={() => setLicenseView({ team: myTeam, player: p })} className="text-[11px] font-mono px-2 py-1 rounded-md" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>{p.license || "—"}</button>
-                          {canManageAll && <button onClick={() => suspendPlayer(myTeam.id, p.id, !p.manuallySuspended)} title={p.manuallySuspended ? "Réactiver le joueur" : "Suspendre le joueur"} className={p.manuallySuspended ? "text-red-600" : "text-stone-300 hover:text-amber-600"}><Ban size={13} /></button>}
+                          <button onClick={() => setLicenseView({ team: manageTeam, player: p })} className="text-[11px] font-mono px-2 py-1 rounded-md" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>{p.license || "—"}</button>
+                          {canManageAll && <button onClick={() => suspendPlayer(manageTeam.id, p.id, !p.manuallySuspended)} title={p.manuallySuspended ? "Réactiver le joueur" : "Suspendre le joueur"} className={p.manuallySuspended ? "text-red-600" : "text-stone-300 hover:text-amber-600"}><Ban size={13} /></button>}
                         </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+            <div className="mt-5 pt-4 border-t" style={{ borderColor: COLORS.line }}>
+              <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-2">Officiels de l'équipe ({(manageTeam.officials || []).length})</div>
+              <div className="space-y-1.5 mb-3">
+                {(manageTeam.officials || []).map(o => (
+                  <div key={o.id} className="flex items-center gap-2 text-sm p-2 rounded-lg border" style={{ borderColor: COLORS.line }}>
+                    <PlayerAvatar name={o.name} photo={o.photo} size={24} />
+                    <span className="flex-1 min-w-0 truncate">{o.name} <span className="text-xs text-stone-400">— {o.role}</span></span>
+                    <span className="font-mono text-xs" style={{ color: COLORS.turf }}>{o.matricule}</span>
+                    <button onClick={() => removeOfficial(manageTeam.id, o.id)} className="text-stone-300 hover:text-red-600"><Trash2 size={13} /></button>
+                  </div>
+                ))}
+                {(manageTeam.officials || []).length === 0 && <p className="text-xs text-stone-400">Aucun officiel pour l'instant (coach adjoint, kiné, dirigeant...).</p>}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <input value={newOfficial.name} onChange={e => setNewOfficial({ teamId: String(manageTeam.id), name: e.target.value, role: newOfficial.role })} placeholder="Nom complet" className="border rounded-lg px-3 py-2 text-sm outline-none flex-1 min-w-[140px]" style={{ borderColor: COLORS.line }} />
+                <input value={newOfficial.role} onChange={e => setNewOfficial({ teamId: String(manageTeam.id), name: newOfficial.name, role: e.target.value })} placeholder="Fonction (coach adjoint, kiné...)" className="border rounded-lg px-3 py-2 text-sm outline-none flex-1 min-w-[160px]" style={{ borderColor: COLORS.line }} />
+                <button type="button" onClick={() => { if (!newOfficial.name.trim()) return; addOfficial(manageTeam.id, newOfficial.name, newOfficial.role); setNewOfficial({ teamId: "", name: "", role: "" }); }} disabled={!newOfficial.name.trim()} className="px-4 py-2 rounded-lg font-semibold text-sm text-white flex items-center gap-1.5 disabled:opacity-40" style={{ background: COLORS.turf }}><Plus size={14} />Ajouter</button>
+              </div>
             </div>
           </div>
         )}
@@ -2064,7 +2168,10 @@ export default function TourneyOS() {
           </div>
         ) : (
           <div className="space-y-8">
-            <div className="flex items-center gap-2 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2"><CheckCircle2 size={13} />Cet événement est publié sur le Dashboard public.</div>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2"><CheckCircle2 size={13} />Cet événement est publié sur le Dashboard public.</div>
+              <button type="button" onClick={() => setTeamsPosterMode("all")} className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg text-white" style={{ background: COLORS.turf }}><Printer size={13} />Imprimer toutes les poules</button>
+            </div>
 
             {canManageAll && (
               <div className="bg-white rounded-2xl border p-5" style={{ borderColor: COLORS.line }}>
@@ -2104,9 +2211,48 @@ export default function TourneyOS() {
               </div>
             )}
 
+            {(canManageAll || currentUser.canAuthorize) && matches.length > 0 && (
+              <div className="bg-white rounded-2xl border p-5" style={{ borderColor: COLORS.line }}>
+                <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Gestion des rencontres</div>
+                <p className="text-[11px] text-stone-400 mb-3">Saisis la date de chaque rencontre. En cas d'empêchement, marque-la "Reportée" (la nouvelle date/heure saisie ci-dessous fait foi) ou déclare un forfait pour attribuer la victoire à l'équipe adverse.</p>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {[...matches].sort((a, b) => (a.date || "9999").localeCompare(b.date || "9999") || (a.slot ?? 0) - (b.slot ?? 0)).map(m => {
+                    const home = teamById[m.home], away = teamById[m.away];
+                    if (!home || !away) return null;
+                    return (
+                      <div key={m.id} className="flex flex-wrap items-center gap-2 text-sm p-2.5 rounded-lg border" style={{ borderColor: COLORS.line }}>
+                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>{m.pool ? `Poule ${m.pool}` : (m.roundLabel || "Finale")}</span>
+                        <span className="flex-1 min-w-[140px] truncate font-medium">{home.name} <span className="text-stone-300">vs</span> {away.name}</span>
+                        {m.postponed && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 shrink-0">Reportée</span>}
+                        {m.forfeitedBy && <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-100 text-red-700 shrink-0">Forfait {teamById[m.forfeitedBy]?.name}</span>}
+                        <input type="date" value={m.date || ""} onChange={e => setMatchDate(m.id, e.target.value)} className="text-xs border rounded-lg px-2 py-1.5 outline-none" style={{ borderColor: COLORS.line }} />
+                        <input type="time" value={m.time || ""} onChange={e => setMatchDate(m.id, m.date || "", e.target.value)} className="text-xs border rounded-lg px-2 py-1.5 outline-none w-24" style={{ borderColor: COLORS.line }} />
+                        <button type="button" onClick={() => togglePostponed(m.id)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border shrink-0" style={{ borderColor: COLORS.line, color: m.postponed ? COLORS.amber : "#9c9686" }}>{m.postponed ? "Annuler report" : "Reporter"}</button>
+                        {m.status !== "done" && (
+                          <select
+                            value=""
+                            onChange={e => {
+                              if (!e.target.value) return;
+                              const forfeitTeam = teamById[e.target.value];
+                              askSaveConfirm(`${forfeitTeam?.name} déclare forfait — la victoire (3-0) sera attribuée à l'équipe adverse.`, [{ label: "Match", value: `${home.name} vs ${away.name}` }, { label: "Équipe forfait", value: forfeitTeam?.name }], () => declareForfeit(m.id, e.target.value), "Confirmer le forfait");
+                            }}
+                            className="text-xs border rounded-lg px-2 py-1.5 outline-none bg-white shrink-0" style={{ borderColor: COLORS.line, color: "#b91c1c" }}
+                          >
+                            <option value="">Forfait…</option>
+                            <option value={m.home}>{home.name} forfait</option>
+                            <option value={m.away}>{away.name} forfait</option>
+                          </select>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {Object.entries(pools).map(([poolName, ids]) => (
               <div key={poolName}>
-                <div className="flex items-center gap-2 mb-3"><span className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: COLORS.turf }}>{poolName}</span><span className="font-bold" style={{ color: COLORS.ink }}>Poule {poolName}</span><span className="text-xs text-stone-400">{ids.filter(id => teamById[id]).map(id => teamById[id].name).join(" · ")}</span></div>
+                <div className="flex items-center gap-2 mb-3"><span className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: COLORS.turf }}>{poolName}</span><span className="font-bold" style={{ color: COLORS.ink }}>Poule {poolName}</span><span className="text-xs text-stone-400">{ids.filter(id => teamById[id]).map(id => teamById[id].name).join(" · ")}</span><button type="button" onClick={() => setTeamsPosterMode(poolName)} className="ml-auto flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg border" style={{ borderColor: COLORS.line, color: COLORS.turf }}><Printer size={11} />Imprimer</button></div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{matches.filter(m => m.pool === poolName).map(m => <MatchCard key={m.id} m={m} teamById={teamById} onClick={() => { setRefereeMatchId(m.id); setView("referee"); }} />)}</div>
               </div>
             ))}
@@ -2505,7 +2651,10 @@ export default function TourneyOS() {
     const suspended = computeSuspendedForEvent(ev);
     const [posterPool, setPosterPool] = useState(null);
     const [posterCfg, setPosterCfg] = useState({ slogan: "Le fair-play avant tout", location: "", instagram: "", facebook: "", accent: "#F5A623" });
-    const [printMode, setPrintMode] = useState(null); // 'schedule' | 'bracket'
+    const [printMode, setPrintMode] = useState(null); // 'schedule' | 'bracket' | 'match'
+    const [printPoolFilter, setPrintPoolFilter] = useState("all");
+    const [printMatchId, setPrintMatchId] = useState(null);
+    const sortedProgrammeMatches = [...ev.matches].sort((a, b) => (a.date || "9999-99-99").localeCompare(b.date || "9999-99-99") || (a.slot ?? 0) - (b.slot ?? 0));
     return (
       <div>
         <button onClick={() => setDashboardEventId(null)} className="flex items-center gap-1 text-xs font-semibold text-stone-500 mb-4 hover:text-stone-700"><ChevronLeft size={14} />Tous les événements</button>
@@ -2518,12 +2667,31 @@ export default function TourneyOS() {
             ))}
           </div>
           {isFullAdmin && (
-            <button onClick={() => setPrintMode(dashboardTab === "bracket" ? "bracket" : "schedule")} className="mb-2 flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: "rgba(13,40,24,0.06)", color: COLORS.pitch }}>
-              <Printer size={13} />{dashboardTab === "bracket" ? "Imprimer le tableau" : "Imprimer le calendrier"}
-            </button>
+            <div className="mb-2 flex items-center gap-2 flex-wrap">
+              {dashboardTab === "programme" && (
+                <select value={printPoolFilter} onChange={e => setPrintPoolFilter(e.target.value)} className="text-xs font-semibold px-2 py-1.5 rounded-lg border bg-white" style={{ borderColor: COLORS.line }}>
+                  <option value="all">Toutes les poules</option>
+                  {Object.keys(ev.pools || {}).map(p => <option key={p} value={p}>Poule {p} uniquement</option>)}
+                </select>
+              )}
+              <button onClick={() => setPrintMode(dashboardTab === "bracket" ? "bracket" : "schedule")} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: "rgba(13,40,24,0.06)", color: COLORS.pitch }}>
+                <Printer size={13} />{dashboardTab === "bracket" ? "Imprimer le tableau" : "Imprimer le programme"}
+              </button>
+            </div>
           )}
         </div>
-        {dashboardTab === "programme" && (ev.matches.length === 0 ? <EmptyState text="Aucun match programmé pour le moment." /> : <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{ev.matches.map(m => <MatchCard key={m.id} m={m} teamById={tb} onClick={() => {}} />)}</div>)}
+        {dashboardTab === "programme" && (ev.matches.length === 0 ? <EmptyState text="Aucun match programmé pour le moment." /> : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {sortedProgrammeMatches.map(m => (
+              <div key={m.id} className="relative">
+                <MatchCard m={m} teamById={tb} onClick={() => {}} />
+                {isFullAdmin && (
+                  <button onClick={() => { setPrintMatchId(m.id); setPrintMode("match"); }} title="Imprimer l'affiche de cette rencontre" className="absolute top-2 right-2 bg-white/90 hover:bg-white rounded-lg p-1.5 shadow-sm border" style={{ borderColor: COLORS.line, color: COLORS.turf }}><Printer size={12} /></button>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
         {dashboardTab === "standings" && (Object.keys(standings).length === 0 ? <EmptyState text="Classement indisponible." /> : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {Object.entries(standings).map(([poolName, table]) => (
@@ -2604,7 +2772,7 @@ export default function TourneyOS() {
               {suspended.length === 0 && <p className="text-sm text-stone-400">Aucun joueur suspendu.</p>}
               {suspended.map((p, i) => (
                 <div key={i} className="text-sm flex items-center justify-between py-1.5" style={{ borderTop: i > 0 ? `1px solid ${COLORS.line}` : "none" }}>
-                  <span>{p.playerName} <span className="text-stone-400">— {tb[p.teamId]?.name}</span></span><span className="text-xs text-red-700 font-medium">{p.reason}</span>
+                  <span>{p.playerName} <span className="text-stone-400">— {tb[p.teamId]?.name}</span></span><span className="text-xs text-red-700 font-medium">{p.reason} · encore {p.matchesRemaining} match{p.matchesRemaining > 1 ? "s" : ""}</span>
                 </div>
               ))}
             </div>
@@ -2618,7 +2786,7 @@ export default function TourneyOS() {
           <div className="fixed inset-0 z-30 bg-black/50 flex items-center justify-center p-4 overflow-y-auto" onClick={() => setPrintMode(null)}>
             <div className="bg-white rounded-2xl p-6 max-w-3xl w-full" onClick={e => e.stopPropagation()}>
               <div className="flex items-center justify-between mb-4 no-print">
-                <h3 className="font-black text-lg" style={{ color: COLORS.ink, fontFamily: "'Barlow Condensed', sans-serif" }}>{printMode === "bracket" ? "Tableau de phase finale" : "Calendrier du tournoi"}</h3>
+                <h3 className="font-black text-lg" style={{ color: COLORS.ink, fontFamily: "'Barlow Condensed', sans-serif" }}>{printMode === "bracket" ? "Tableau de phase finale" : printMode === "match" ? "Affiche de rencontre" : "Programme du tournoi"}</h3>
                 <div className="flex gap-2">
                   <button onClick={() => window.print()} className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: COLORS.turf }}><Printer size={13} />Imprimer / PDF</button>
                   <button onClick={() => setPrintMode(null)} className="text-stone-400 hover:text-stone-600 text-sm font-semibold">Fermer</button>
@@ -2627,7 +2795,9 @@ export default function TourneyOS() {
               <div className="print-area">
                 {printMode === "bracket"
                   ? <PrintableBracket bracket={ev.bracket} teamById={tb} eventName={ev.settings.name} />
-                  : <PrintableSchedule ev={ev} teamById={tb} />}
+                  : printMode === "match"
+                  ? <MatchPoster ev={ev} m={ev.matches.find(m => m.id === printMatchId)} teamById={tb} />
+                  : <PrintableSchedule ev={ev} teamById={tb} onlyPool={printPoolFilter === "all" ? null : printPoolFilter} />}
               </div>
             </div>
           </div>
@@ -2745,6 +2915,31 @@ export default function TourneyOS() {
         <main className="p-4 sm:p-6 lg:p-10 overflow-x-hidden">{ActiveView()}</main>
       </div>
       <ConfirmModal modal={confirmModal} onClose={() => setConfirmModal(null)} />
+      {teamsPosterMode && (
+        <div className="fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4 overflow-y-auto" onClick={() => setTeamsPosterMode(null)}>
+          <div className="bg-white rounded-2xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4 no-print">
+              <h3 className="font-black text-lg" style={{ color: COLORS.ink, fontFamily: "'Barlow Condensed', sans-serif" }}>{teamsPosterMode === "all" ? "Toutes les poules" : `Poule ${teamsPosterMode}`} — visuel imprimable</h3>
+              <div className="flex gap-2">
+                <button onClick={() => window.print()} className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: COLORS.turf }}><Printer size={13} />Imprimer</button>
+                <button onClick={() => setTeamsPosterMode(null)} className="text-stone-400 hover:text-stone-600 text-sm font-semibold">Fermer</button>
+              </div>
+            </div>
+            <p className="text-xs text-stone-400 mb-4 no-print">Chaque poster a aussi son propre bouton de téléchargement PNG (pour partager sur les réseaux sociaux).</p>
+            <div className="print-area space-y-8">
+              {(teamsPosterMode === "all" ? Object.keys(activeEvent.pools || {}) : [teamsPosterMode]).map(poolName => (
+                <ClassementPoster
+                  key={poolName}
+                  poolName={`Poule ${poolName}`}
+                  eventName={activeEvent.settings.name}
+                  theme={{ primary: COLORS.pitch, accent: COLORS.amber }}
+                  teams={(activeEvent.pools[poolName] || []).filter(id => teamById[id]).map((id, i) => { const t = teamById[id]; const st = (computeStandingsForEvent(activeEvent)[poolName] || []).find(r => r.id === id) || {}; return { rank: i + 1, name: t.name, logo: t.logo, mj: st.mj || 0, bt: st.bt || 0, be: st.be || 0, gd: st.gd || 0, pts: st.pts || 0 }; })}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <LicenseCardModal view={licenseView} eventName={managingEvent.settings.name} onClose={() => setLicenseView(null)} />
       <TeamLicensesModal team={teamLicensesView} eventName={managingEvent.settings.name} onOpenPlayer={p => { setLicenseView({ team: teamLicensesView, player: p }); }} onClose={() => setTeamLicensesView(null)} />
     </div>
