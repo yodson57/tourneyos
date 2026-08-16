@@ -784,10 +784,9 @@ export default function TourneyOS() {
     return unsub;
   }, [currentUser?.id]);
 
-  /* default the managed event once events are available and none is selected yet */
-  useEffect(() => {
-    if (!managingEventId && events.length) setManagingEventId(events[0].id);
-  }, [events, managingEventId]);
+  /* Les admins/super-admins n'entrent plus automatiquement dans un événement à la connexion :
+     "Mes événements" est la page d'accueil globale, et il faut ouvrir un événement explicitement
+     pour accéder à son espace de gestion dédié (Configuration, Équipes, Cartes, Tirage...). */
 
   const activeEventId = (currentUser?.role === "admin" || currentUser?.role === "super_admin") ? managingEventId : currentUser?.eventId;
   const activeEvent = events.find(e => e.id === activeEventId) || EMPTY_EVENT;
@@ -803,7 +802,16 @@ export default function TourneyOS() {
 
   const teamById = useMemo(() => Object.fromEntries(teams.map(t => [t.id, t])), [teams]);
   const isFullAdmin = currentUser?.role === "admin" || currentUser?.role === "super_admin";
-  const allowedNav = useMemo(() => currentUser ? NAV.filter(n => n.roles.includes(currentUser.role) || (currentUser.canAuthorize && (n.id === "users" || n.id === "refunds" || n.id === "cards"))) : [], [currentUser]);
+  const allowedNav = useMemo(() => {
+    if (!currentUser) return [];
+    const canAuthorizeExtras = ["users", "refunds", "cards", "setup", "teams"];
+    let nav = NAV.filter(n => n.roles.includes(currentUser.role) || (currentUser.canAuthorize && canAuthorizeExtras.includes(n.id)));
+    // Page d'accueil globale pour les admins/super-admins : tant qu'aucun événement n'est ouvert,
+    // seuls "Mes événements" (pour en choisir/créer un) et "Recherche" (transverse) sont accessibles —
+    // les équipes, joueurs, cartes, utilisateurs, etc. n'existent que DANS un événement ouvert.
+    if (isFullAdmin && !managingEventId) nav = nav.filter(n => n.id === "events" || n.id === "search");
+    return nav;
+  }, [currentUser, managingEventId, isFullAdmin]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -1622,6 +1630,7 @@ export default function TourneyOS() {
     return (
       <div className="max-w-2xl">
         <SectionTitle eyebrow={ROLE_LABELS[currentUser.role]} title="Mes événements" count={`${events.length} événements`} />
+        <p className="text-xs text-stone-400 -mt-2 mb-4">Chaque événement est un espace de gestion indépendant (équipes, joueurs, utilisateurs, cartes, tirage...). Ouvre un événement ci-dessous pour y entrer.</p>
         {eventsListenerError && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">Impossible de charger les événements : {eventsListenerError}</p>}
         {eventError && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">{eventError}</p>}
         <div className="bg-white rounded-2xl border p-5 mb-6 flex gap-3" style={{ borderColor: COLORS.line }}>
@@ -2680,10 +2689,18 @@ export default function TourneyOS() {
           <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: COLORS.amber }}><Trophy size={18} style={{ color: COLORS.pitch }} /></div>
           <div><div className="text-white font-black text-lg leading-none" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>TourneyOS</div><div className="text-[10px] text-white/40 uppercase tracking-wider">Gestion de tournois</div></div>
         </div>
-        {(currentUser.role === "admin" || currentUser.role === "super_admin") && (
-          <button onClick={() => { setView("events"); setNavOpen(false); }} className="mx-3 mb-2 px-3 py-2 rounded-lg text-left" style={{ background: "rgba(245,166,35,0.1)" }}>
-            <div className="text-[9px] uppercase tracking-wide text-white/40">Événement géré</div><div className="text-xs font-bold truncate" style={{ color: COLORS.amber }}>{managingEvent.settings.name}</div>
-          </button>
+        {(currentUser.role === "admin" || currentUser.role === "super_admin") && managingEventId && (
+          <div className="mx-3 mb-2 px-3 py-2 rounded-lg" style={{ background: "rgba(245,166,35,0.1)" }}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0"><div className="text-[9px] uppercase tracking-wide text-white/40">Espace événement</div><div className="text-xs font-bold truncate" style={{ color: COLORS.amber }}>{managingEvent.settings.name}</div></div>
+              <button onClick={() => { setManagingEventId(null); setView("events"); setNavOpen(false); }} title="Retour à l'accueil global (Mes événements)" className="shrink-0 text-white/50 hover:text-white"><ChevronLeft size={16} /></button>
+            </div>
+          </div>
+        )}
+        {(currentUser.role === "admin" || currentUser.role === "super_admin") && !managingEventId && (
+          <div className="mx-3 mb-2 px-3 py-2 rounded-lg" style={{ background: "rgba(255,255,255,0.06)" }}>
+            <div className="text-[9px] uppercase tracking-wide text-white/40">Accueil global</div><div className="text-xs font-bold text-white/70">Ouvre un événement pour le gérer</div>
+          </div>
         )}
         <nav className="flex-1 px-3 space-y-1 mt-1">
           {allowedNav.map(item => {
