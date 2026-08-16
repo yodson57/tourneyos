@@ -2,36 +2,43 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function isSignedIn() { return request.auth != null; }
+    function myProfile() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function hasProfile() { return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
+    function isSuperAdmin() { return hasProfile() && myProfile().role == 'super_admin'; }
+    // Vrai pour le staff (superviseur/arbitre/président/joueur) rattaché à CET événement précis.
+    function isStaffOfEvent(eventId) { return hasProfile() && myProfile().eventId == eventId; }
+
     // --- Événements ---
-    // Lecture : tout événement dont le tirage a été lancé (pools != null) est lisible
-    // par tout le monde (dashboard public), et un utilisateur connecté peut lire
-    // n'importe quel événement (y compris les brouillons, pour l'administration).
-    // Volontairement simple : une règle basée sur un champ imbriqué (ex. settings.publicAccess)
-    // a déjà cassé la lecture de TOUTE la collection par le passé — le filtrage fin
-    // de "accès public par événement" reste géré côté application.
+    // Lecture : public si le tirage est lancé (pools != null, dashboard public), le Super-Administrateur
+    // (vue système), l'organisateur qui l'a créé, ou le staff qui y est rattaché.
+    // Écriture (update/delete) : Super-Administrateur, l'organisateur créateur, ou (rétrocompatibilité)
+    // un événement créé avant l'ajout du champ createdBy.
     match /events/{eventId} {
-      allow read: if resource.data.pools != null || request.auth != null;
-      allow create: if request.auth != null;
-      allow update, delete: if request.auth != null;
+      allow read: if resource.data.pools != null
+        || isSuperAdmin()
+        || (isSignedIn() && resource.data.createdBy == request.auth.uid)
+        || isStaffOfEvent(eventId);
+      allow create: if isSignedIn();
+      allow update, delete: if isSuperAdmin()
+        || (isSignedIn() && resource.data.createdBy == request.auth.uid)
+        || (isSignedIn() && !('createdBy' in resource.data));
     }
 
     // --- Comptes utilisateurs ---
-    // Un utilisateur connecté peut lire l'annuaire (nécessaire à l'admin et aux
-    // "ayants droit" pour gérer rôles/équipes) et écrire (les vérifications fines
-    // de rôle sont faites côté application).
+    // Un utilisateur connecté peut lire l'annuaire (nécessaire à l'admin et aux ayants droit pour
+    // gérer rôles/équipes) et écrire (le filtrage fin par événement est fait côté application ;
+    // voir la note ci-dessous si une isolation stricte devient nécessaire).
     match /users/{userId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
     }
 
-    // --- Table de correspondance identifiant -> email (pour le login par
-    // nom d'utilisateur / téléphone / ID de profil) ---
-    // Lecture publique par ID EXACT uniquement (jamais de liste possible avec get()),
-    // écriture réservée aux utilisateurs connectés.
+    // --- Table de correspondance identifiant -> email (login par nom d'utilisateur / téléphone / ID) ---
     match /loginLookup/{id} {
       allow get: if true;
       allow list: if false;
-      allow write: if request.auth != null;
+      allow write: if isSignedIn();
     }
   }
 }
