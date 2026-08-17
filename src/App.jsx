@@ -99,6 +99,24 @@ function makeTeam(id, name, city, licensePrefix = "TMP") {
   };
 }
 
+/* URL propre et partageable par événement (ex. /mon-tournoi). */
+function slugify(str) {
+  return (
+    (str || "")
+      .toString()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // enlever les accents
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "tournoi"
+  );
+}
+function uniqueSlug(base, existingSlugs) {
+  let slug = base, i = 2;
+  while (existingSlugs.includes(slug)) { slug = `${base}-${i}`; i++; }
+  return slug;
+}
+
 function defaultSettings(name) {
   return {
     name, win: 3, draw: 1, loss: 0, halfMinutes: 25, subs: 5, poolSize: 4,
@@ -731,7 +749,28 @@ export default function TourneyOS() {
   const [navOpen, setNavOpen] = useState(false);
   const [refereeMatchId, setRefereeMatchId] = useState(null);
   const [dashboardEventId, setDashboardEventId] = useState(null);
+  const urlResolvedRef = useRef(false);
+  useEffect(() => {
+    if (urlResolvedRef.current || events.length === 0) return;
+    const path = window.location.pathname.replace(/^\/+|\/+$/g, "");
+    if (path) {
+      const match = events.find(e => e.slug === path);
+      if (match) { setPublicMode(true); setDashboardEventId(match.id); }
+    }
+    urlResolvedRef.current = true;
+  }, [events]);
+  /* Ouvre l'événement (URL partageable /mon-tournoi) et synchronise la barre d'adresse. */
+  function openPublicEvent(ev) {
+    setDashboardEventId(ev.id);
+    setDashboardTab("programme");
+    if (ev.slug) window.history.pushState({}, "", "/" + ev.slug);
+  }
+  function closePublicEvent() {
+    setDashboardEventId(null);
+    window.history.pushState({}, "", "/");
+  }
   const [dashboardTab, setDashboardTab] = useState("programme");
+  const [linkCopied, setLinkCopied] = useState(false);
   const fileRef = useRef(null);
   const [newTeam, setNewTeam] = useState({ name: "", city: "", logo: null, coachName: "", coachPhone: "" });
   const [newAccount, setNewAccount] = useState({ name: "", email: "", username: "", phone: "", role: "arbitre", teamId: "", playerId: "", password: "", canAuthorize: false });
@@ -882,7 +921,7 @@ export default function TourneyOS() {
       .then(() => { setLoginForm({ email: "", password: "", error: "" }); setView("setup"); })
       .catch(err => setLoginForm({ ...loginForm, error: AUTH_ERROR_MESSAGES[err.code] || "Connexion impossible. Réessayez." }));
   }
-  function logout() { signOut(auth); setNavOpen(false); setDashboardEventId(null); }
+  function logout() { signOut(auth); setNavOpen(false); setDashboardEventId(null); window.history.pushState({}, "", "/"); }
 
   /* ---------- teams ---------- */
   function handleLogoFile(e, cb) {
@@ -1056,7 +1095,8 @@ export default function TourneyOS() {
     setEventError("");
     try {
       const ref = doc(collection(db, "events"));
-      await setDoc(ref, { settings: defaultSettings(name), teams: [], pools: null, matches: [], refundRequests: [], bracket: null, pinned: false, createdBy: currentUser.id, createdByName: currentUser.name });
+      const slug = uniqueSlug(slugify(name), events.map(e => e.slug).filter(Boolean));
+      await setDoc(ref, { settings: defaultSettings(name), teams: [], pools: null, matches: [], refundRequests: [], bracket: null, pinned: false, createdBy: currentUser.id, createdByName: currentUser.name, slug });
       setManagingEventId(ref.id);
       setNewEventName("");
       setView("setup");
@@ -1117,6 +1157,11 @@ export default function TourneyOS() {
       if (!nextLetter) return e;
       return { ...e, pools: { ...e.pools, [nextLetter]: [] } };
     });
+  }
+  /* Attribue un lien /slug aux événements créés avant l'ajout de cette fonctionnalité. */
+  function assignSlugToEvent(ev) {
+    const slug = uniqueSlug(slugify(ev.settings.name), events.map(e => e.slug).filter(Boolean));
+    updateEvent(ev.id, e => ({ ...e, slug }));
   }
   function manualGenerateBracket() { updateEvent(activeEventId, e => ({ ...e, bracket: generateBracket(e) })); }
 
@@ -2627,7 +2672,7 @@ export default function TourneyOS() {
             {launched.map(ev => {
               const played = ev.matches.filter(m => m.status === "done").length;
               return (
-                <button key={ev.id} onClick={() => { setDashboardEventId(ev.id); setDashboardTab("programme"); }} className="text-left bg-white rounded-2xl border p-6 hover:shadow-lg transition-shadow" style={ev.pinned ? { borderColor: COLORS.amber, boxShadow: `0 0 0 1px ${COLORS.amber}` } : { borderColor: COLORS.line }}>
+                <button key={ev.id} onClick={() => openPublicEvent(ev)} className="text-left bg-white rounded-2xl border p-6 hover:shadow-lg transition-shadow" style={ev.pinned ? { borderColor: COLORS.amber, boxShadow: `0 0 0 1px ${COLORS.amber}` } : { borderColor: COLORS.line }}>
                   <div className="flex items-center justify-between mb-4"><StatusPill ev={ev} />{ev.pinned ? <Star size={16} fill={COLORS.amber} style={{ color: COLORS.amber }} /> : <Trophy size={16} className="text-stone-300" />}</div>
                   <h3 className="text-xl font-black mb-1" style={{ color: COLORS.ink, fontFamily: "'Barlow Condensed', sans-serif" }}>{ev.settings.name}</h3>
                   <p className="text-xs text-stone-500 mb-4">{ev.teams.length} équipes · {Object.keys(ev.pools || {}).length} poules</p>
@@ -2657,7 +2702,18 @@ export default function TourneyOS() {
     const sortedProgrammeMatches = [...ev.matches].sort((a, b) => (a.date || "9999-99-99").localeCompare(b.date || "9999-99-99") || (a.slot ?? 0) - (b.slot ?? 0));
     return (
       <div>
-        <button onClick={() => setDashboardEventId(null)} className="flex items-center gap-1 text-xs font-semibold text-stone-500 mb-4 hover:text-stone-700"><ChevronLeft size={14} />Tous les événements</button>
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <button onClick={closePublicEvent} className="flex items-center gap-1 text-xs font-semibold text-stone-500 hover:text-stone-700"><ChevronLeft size={14} />Tous les événements</button>
+          {ev.slug ? (
+            <button
+              onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/${ev.slug}`); setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2000); }}
+              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg border"
+              style={{ borderColor: COLORS.line, color: linkCopied ? "#fff" : COLORS.turf, background: linkCopied ? COLORS.turf : "transparent" }}
+            ><ClipboardList size={12} />{linkCopied ? "Lien copié !" : "Copier le lien du tournoi"}</button>
+          ) : isFullAdmin && (
+            <button onClick={() => assignSlugToEvent(ev)} className="text-xs font-semibold px-3 py-1.5 rounded-lg border" style={{ borderColor: COLORS.line, color: "#9c9686" }}>Générer le lien du tournoi</button>
+          )}
+        </div>
         <SectionTitle eyebrow="Dashboard public" title={ev.settings.name} count={`${ev.matches.filter(m => m.status === "done").length}/${ev.matches.length} matchs joués`} />
         <LiveMatchHero ev={ev} />
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3 border-b" style={{ borderColor: COLORS.line }}>
