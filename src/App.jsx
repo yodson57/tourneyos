@@ -275,6 +275,31 @@ function onFieldPlayers(match, teamId, team) {
 const ROUND_NAMES_BY_SIZE = { 2: ["Finale"], 4: ["Demi-finale", "Finale"], 8: ["Quart de finale", "Demi-finale", "Finale"], 16: ["Huitième de finale", "Quart de finale", "Demi-finale", "Finale"], 32: ["Seizième de finale", "Huitième de finale", "Quart de finale", "Demi-finale", "Finale"] };
 function roundNamesForSize(size) { return ROUND_NAMES_BY_SIZE[size] || Array.from({ length: Math.log2(size) }, (_, i) => `Tour ${i + 1}`); }
 function nextPowerOf2(n) { let p = 1; while (p < n) p *= 2; return p; }
+/* Construit les affiches du 1er tour de phase finale en garantissant qu'aucune rencontre
+   n'oppose deux équipes issues de la MÊME poule (tant qu'une alternative existe) — évite par
+   exemple qu'un 1er et un 2e de la Poule C ne se retrouvent dès le 1er tour. */
+function buildBracketRound1Pairs(poolNames, standings, qualifiersPerPool) {
+  const flat = [];
+  for (let r = 0; r < qualifiersPerPool; r++) {
+    poolNames.forEach(pn => {
+      const table = standings[pn] || [];
+      if (table[r]) flat.push({ pool: pn, teamId: table[r].id, label: `${r + 1}${r === 0 ? "er" : "e"} Poule ${pn}` });
+    });
+  }
+  if (flat.length < 2) return null;
+  const size = nextPowerOf2(flat.length);
+  const remaining = [...flat];
+  while (remaining.length < size) remaining.push(null); // complète avec des exempts (byes)
+  const pairs = [];
+  while (remaining.length > 0) {
+    const a = remaining.shift();
+    let idx = a ? remaining.findIndex(x => x && x.pool !== a.pool) : remaining.findIndex(x => x !== null);
+    if (idx === -1) idx = 0;
+    const b = remaining.splice(idx, 1)[0];
+    pairs.push([a, b]);
+  }
+  return pairs;
+}
 function bracketPairIndices(size) {
   let seeds = [1, 2];
   while (seeds.length < size) {
@@ -301,23 +326,16 @@ function generateBracket(ev) {
   const qualifiersPerPool = ev.settings.qualifiersPerPool || 2;
   const standings = computeStandingsForEvent(ev);
   const poolNames = Object.keys(ev.pools).sort();
-  const seedList = [];
-  for (let rank = 0; rank < qualifiersPerPool; rank++) {
-    poolNames.forEach(poolName => {
-      const table = standings[poolName];
-      if (table && table[rank]) seedList.push({ teamId: table[rank].id, label: `${rank + 1}${rank === 0 ? "er" : "e"} Poule ${poolName}` });
-    });
-  }
-  if (seedList.length < 2) return null;
-  const size = nextPowerOf2(seedList.length);
-  const pairs = bracketPairIndices(size);
-  const round1 = pairs.map(([a, b], i) => {
-    const teamA = seedList[a]?.teamId ?? null;
-    const teamB = seedList[b]?.teamId ?? null;
+  const pairs = buildBracketRound1Pairs(poolNames, standings, qualifiersPerPool);
+  if (!pairs) return null;
+  const size = pairs.length * 2;
+  const round1 = pairs.map(([seedA, seedB], i) => {
+    const teamA = seedA?.teamId ?? null;
+    const teamB = seedB?.teamId ?? null;
     const isBye = (teamA && !teamB) || (!teamA && teamB);
     return {
       id: `bracket-r0-m${i}`, round: 0, home: teamA, away: teamB,
-      homeLabel: seedList[a]?.label || null, awayLabel: seedList[b]?.label || null,
+      homeLabel: seedA?.label || null, awayLabel: seedB?.label || null,
       field: "Terrain A", time: "à définir", status: isBye ? "done" : "scheduled",
       homeScore: isBye && teamA ? 1 : 0, awayScore: isBye && teamB ? 1 : 0,
       events: [], clock: emptyBracketClock(), lineups: {}, subRequests: [],
@@ -789,6 +807,9 @@ export default function TourneyOS() {
   const [newOfficial, setNewOfficial] = useState({ teamId: "", name: "", role: "" });
   const [newMedia, setNewMedia] = useState({ name: "", org: "", role: "" });
   const [drawStrategy, setDrawStrategy] = useState("balance");
+  const [scheduleStartDate, setScheduleStartDate] = useState("");
+  const [scheduleMatchesPerDay, setScheduleMatchesPerDay] = useState(4);
+  const [scheduleWeekdays, setScheduleWeekdays] = useState([0, 1, 2, 3, 4, 5, 6]); // 0=dimanche ... 6=samedi
   /* États remontés au niveau supérieur (au lieu d'être déclarés à l'intérieur de fonctions de vue
      imbriquées appelées via {MaVue()}) — sinon le nombre de hooks change selon l'écran actif,
      ce qui viole les règles de React et provoque des pages vierges au changement d'écran. */
@@ -1181,6 +1202,29 @@ export default function TourneyOS() {
   /* ---------- report & forfait ---------- */
   function setMatchDate(matchId, date, time) {
     updateEvent(activeEventId, e => ({ ...e, matches: e.matches.map(m => m.id !== matchId ? m : { ...m, date, ...(time ? { time } : {}) }) }));
+  }
+  /* Génère automatiquement les dates de toutes les rencontres (poules + phase finale) à partir
+     d'une date de début, d'un nombre de matchs par jour, et des jours de la semaine autorisés. */
+  function autoScheduleMatchDates(startDate, matchesPerDay, allowedWeekdays) {
+    if (!startDate || !matchesPerDay || matchesPerDay < 1) return;
+    updateEvent(activeEventId, e => {
+      const sorted = [...e.matches].sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
+      const isAllowed = d => !allowedWeekdays?.length || allowedWeekdays.includes(d.getDay());
+      const cursor = new Date(startDate + "T00:00:00");
+      while (!isAllowed(cursor)) cursor.setDate(cursor.getDate() + 1);
+      const dateByMatchId = {};
+      let count = 0;
+      sorted.forEach(m => {
+        if (count >= matchesPerDay) {
+          cursor.setDate(cursor.getDate() + 1);
+          while (!isAllowed(cursor)) cursor.setDate(cursor.getDate() + 1);
+          count = 0;
+        }
+        dateByMatchId[m.id] = cursor.toISOString().slice(0, 10);
+        count++;
+      });
+      return { ...e, matches: e.matches.map(m => dateByMatchId[m.id] ? { ...m, date: dateByMatchId[m.id] } : m) };
+    });
   }
   function postponeMatch(matchId, newDate, newTime) {
     if (!newDate) return;
@@ -2269,6 +2313,37 @@ export default function TourneyOS() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {(canManageAll || currentUser.canAuthorize) && matches.length > 0 && (
+              <div className="bg-white rounded-2xl border p-5" style={{ borderColor: COLORS.line }}>
+                <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Génération automatique du calendrier</div>
+                <p className="text-[11px] text-stone-400 mb-3">Attribue une date à toutes les rencontres (poules + phase finale) en une fois, à partir d'une date de début et d'un nombre de matchs par jour.</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-3">
+                  <div><label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">Date de début</label>
+                    <input type="date" value={scheduleStartDate} onChange={e => setScheduleStartDate(e.target.value)} className="w-full border rounded-lg px-3 py-2 outline-none" style={{ borderColor: COLORS.line }} /></div>
+                  {NumberField({ label: "Matchs par jour", value: scheduleMatchesPerDay, onChange: setScheduleMatchesPerDay })}
+                </div>
+                <div className="mb-4">
+                  <label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1.5">Jours de la semaine utilisés</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[{ v: 1, l: "Lun" }, { v: 2, l: "Mar" }, { v: 3, l: "Mer" }, { v: 4, l: "Jeu" }, { v: 5, l: "Ven" }, { v: 6, l: "Sam" }, { v: 0, l: "Dim" }].map(d => (
+                      <button key={d.v} type="button" onClick={() => setScheduleWeekdays(s => s.includes(d.v) ? s.filter(x => x !== d.v) : [...s, d.v])} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border" style={{ borderColor: COLORS.line, background: scheduleWeekdays.includes(d.v) ? COLORS.turf : "transparent", color: scheduleWeekdays.includes(d.v) ? "#fff" : "#78716c" }}>{d.l}</button>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => askSaveConfirm(
+                    "Cela réattribue une date à TOUTES les rencontres de cet événement (poules + phase finale), en écrasant les dates déjà saisies manuellement.",
+                    [{ label: "Date de début", value: scheduleStartDate || "—" }, { label: "Matchs par jour", value: `${scheduleMatchesPerDay}` }],
+                    () => autoScheduleMatchDates(scheduleStartDate, scheduleMatchesPerDay, scheduleWeekdays),
+                    "Générer le calendrier"
+                  )}
+                  disabled={!scheduleStartDate || scheduleMatchesPerDay < 1 || scheduleWeekdays.length === 0}
+                  className="px-4 py-2.5 rounded-lg font-semibold text-sm text-white disabled:opacity-40" style={{ background: COLORS.turf }}
+                >Générer le calendrier automatiquement</button>
               </div>
             )}
 
