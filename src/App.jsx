@@ -751,7 +751,6 @@ export default function TourneyOS() {
   const [newMedia, setNewMedia] = useState({ name: "", org: "", role: "" });
   const [drawStrategy, setDrawStrategy] = useState("balance");
   const [manageTeamId, setManageTeamId] = useState(null);
-  useEffect(() => { setManageTeamId(null); }, [activeEventId]);
   const [teamsPosterMode, setTeamsPosterMode] = useState(null); // null | nom de poule | 'all'
   const [eventError, setEventError] = useState("");
   const [publicMode, setPublicMode] = useState(false);
@@ -805,6 +804,7 @@ export default function TourneyOS() {
      pour accéder à son espace de gestion dédié (Configuration, Équipes, Cartes, Tirage...). */
 
   const activeEventId = (currentUser?.role === "admin" || currentUser?.role === "super_admin") ? managingEventId : currentUser?.eventId;
+  useEffect(() => { setManageTeamId(null); }, [activeEventId]);
   const activeEvent = events.find(e => e.id === activeEventId) || EMPTY_EVENT;
   const managingEvent = events.find(e => e.id === managingEventId) || EMPTY_EVENT;
   const settings = activeEvent.settings;
