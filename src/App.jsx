@@ -12,6 +12,7 @@ import {
 } from "firebase/auth";
 import {
   getFirestore, collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, deleteField, getDoc,
+  query, where, documentId,
 } from "firebase/firestore";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { firebaseConfig } from "./firebase";
@@ -775,22 +776,13 @@ export default function TourneyOS() {
   const [profileMissing, setProfileMissing] = useState(false);
   const [loginForm, setLoginForm] = useState({ email: "", password: "", error: "" });
   const [accounts, setAccounts] = useState([]);
-  const [events, setEvents] = useState([]);
+  // events est maintenant dérivé de deux écoutes Firestore fusionnées (voir plus bas)
   const [managingEventId, setManagingEventId] = useState(null);
   const [view, setView] = useState("setup");
   const [navOpen, setNavOpen] = useState(false);
   const [refereeMatchId, setRefereeMatchId] = useState(null);
   const [dashboardEventId, setDashboardEventId] = useState(null);
   const urlResolvedRef = useRef(false);
-  useEffect(() => {
-    if (urlResolvedRef.current || events.length === 0) return;
-    const path = window.location.pathname.replace(/^\/+|\/+$/g, "");
-    if (path) {
-      const match = events.find(e => e.slug === path);
-      if (match) { setPublicMode(true); setDashboardEventId(match.id); }
-    }
-    urlResolvedRef.current = true;
-  }, [events]);
   /* Ouvre l'événement (URL partageable /mon-tournoi) et synchronise la barre d'adresse. */
   function openPublicEvent(ev) {
     setDashboardEventId(ev.id);
@@ -866,16 +858,55 @@ export default function TourneyOS() {
     return unsub;
   }, [firebaseUser]);
 
-  /* Real-time sync: every event document, shared across all connected users */
+  /* Real-time sync des événements — DEUX écoutes fusionnées, car une requête Firestore non filtrée
+     est rejetée en bloc dès que la règle de sécurité dépend du contenu de chaque document (elle ne
+     se contente pas de filtrer silencieusement, elle refuse toute la requête) :
+     1) Écoute publique : tous les événements PUBLIÉS (pools != null) — visible par tout le monde,
+        connecté ou non, exactement ce qu'un "dashboard public" doit être.
+     2) Écoute scopée : selon le rôle, donne en plus la visibilité de gestion nécessaire (Super-Administrateur
+        = tout ; Administrateur d'événement = les événements qu'il a créés, y compris non publiés ;
+        Superviseur/Arbitre/Président/Joueur = uniquement l'événement auquel leur compte est rattaché).
+     Les deux résultats sont fusionnés (la version scopée prime en cas de doublon). */
+  const [publicEvents, setPublicEvents] = useState([]);
+  const [scopedEvents, setScopedEvents] = useState([]);
   const [eventsListenerError, setEventsListenerError] = useState("");
   useEffect(() => {
     const unsub = onSnapshot(
-      collection(db, "events"),
-      snap => { setEventsListenerError(""); setEvents(snap.docs.map(d => ({ id: d.id, ...d.data() }))); },
-      err => { console.error("Échec de lecture Firestore (events) :", err); setEventsListenerError(err.message || String(err)); }
+      query(collection(db, "events"), where("pools", "!=", null)),
+      snap => { setEventsListenerError(""); setPublicEvents(snap.docs.map(d => ({ id: d.id, ...d.data() }))); },
+      err => { console.error("Échec de lecture Firestore (events, public) :", err); setEventsListenerError(err.message || String(err)); }
     );
     return unsub;
   }, []);
+  useEffect(() => {
+    if (!currentUser) { setScopedEvents([]); return; }
+    let q;
+    if (currentUser.role === "super_admin") q = collection(db, "events");
+    else if (currentUser.role === "admin") q = query(collection(db, "events"), where("createdBy", "==", currentUser.id));
+    else if (currentUser.eventId) q = query(collection(db, "events"), where(documentId(), "==", currentUser.eventId));
+    else { setScopedEvents([]); return; }
+    const unsub = onSnapshot(
+      q,
+      snap => { setEventsListenerError(""); setScopedEvents(snap.docs.map(d => ({ id: d.id, ...d.data() }))); },
+      err => { console.error("Échec de lecture Firestore (events, scopé) :", err); setEventsListenerError(err.message || String(err)); }
+    );
+    return unsub;
+  }, [currentUser?.role, currentUser?.id, currentUser?.eventId]);
+  const events = useMemo(() => {
+    const map = new Map();
+    publicEvents.forEach(e => map.set(e.id, e));
+    scopedEvents.forEach(e => map.set(e.id, e));
+    return Array.from(map.values());
+  }, [publicEvents, scopedEvents]);
+  useEffect(() => {
+    if (urlResolvedRef.current || events.length === 0) return;
+    const path = window.location.pathname.replace(/^\/+|\/+$/g, "");
+    if (path) {
+      const match = events.find(e => e.slug === path);
+      if (match) { setPublicMode(true); setDashboardEventId(match.id); }
+    }
+    urlResolvedRef.current = true;
+  }, [events]);
 
   /* Real-time sync: user directory (only meaningfully readable by admins/ayants droit — see firestore.rules) */
   useEffect(() => {
