@@ -789,6 +789,19 @@ export default function TourneyOS() {
   const [newOfficial, setNewOfficial] = useState({ teamId: "", name: "", role: "" });
   const [newMedia, setNewMedia] = useState({ name: "", org: "", role: "" });
   const [drawStrategy, setDrawStrategy] = useState("balance");
+  /* États remontés au niveau supérieur (au lieu d'être déclarés à l'intérieur de fonctions de vue
+     imbriquées appelées via {MaVue()}) — sinon le nombre de hooks change selon l'écran actif,
+     ce qui viole les règles de React et provoque des pages vierges au changement d'écran. */
+  const [refundSelectedPlayers, setRefundSelectedPlayers] = useState([]);
+  const [refundReason, setRefundReason] = useState("");
+  const [showMatchSheet, setShowMatchSheet] = useState(false);
+  useEffect(() => { setShowMatchSheet(false); }, [refereeMatchId]);
+  const [posterPool, setPosterPool] = useState(null);
+  const [posterCfg, setPosterCfg] = useState({ slogan: "Le fair-play avant tout", location: "", instagram: "", facebook: "", accent: "#F5A623" });
+  const [printMode, setPrintMode] = useState(null); // 'schedule' | 'bracket' | 'match'
+  const [printPoolFilter, setPrintPoolFilter] = useState("all");
+  const [printMatchId, setPrintMatchId] = useState(null);
+  useEffect(() => { setPosterPool(null); setPrintMode(null); setPrintMatchId(null); }, [dashboardEventId]);
   const [manageTeamId, setManageTeamId] = useState(null);
   const [teamsPosterMode, setTeamsPosterMode] = useState(null); // null | nom de poule | 'all'
   const [eventError, setEventError] = useState("");
@@ -1947,14 +1960,12 @@ export default function TourneyOS() {
     const canDecide = isFullAdmin || currentUser.canAuthorize;
     const myTeam = isCoach ? teamById[currentUser.teamId] : null;
     const requests = activeEvent.refundRequests || [];
-    const [selectedPlayers, setSelectedPlayers] = useState([]);
-    const [reason, setReason] = useState("");
 
-    function togglePlayer(pid) { setSelectedPlayers(sel => sel.includes(pid) ? sel.filter(x => x !== pid) : [...sel, pid]); }
+    function togglePlayer(pid) { setRefundSelectedPlayers(sel => sel.includes(pid) ? sel.filter(x => x !== pid) : [...sel, pid]); }
     function submit() {
-      if (!myTeam || selectedPlayers.length === 0 || !reason.trim()) return;
-      submitRefundRequest(myTeam.id, selectedPlayers, reason.trim());
-      setSelectedPlayers([]); setReason("");
+      if (!myTeam || refundSelectedPlayers.length === 0 || !refundReason.trim()) return;
+      submitRefundRequest(myTeam.id, refundSelectedPlayers, refundReason.trim());
+      setRefundSelectedPlayers([]); setRefundReason("");
     }
 
     const list = isCoach ? requests.filter(r => r.teamId === myTeam?.id) : requests;
@@ -1967,23 +1978,23 @@ export default function TourneyOS() {
             <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-2">Nouvelle demande</div>
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2 mb-3">
               {myTeam.players.map(p => (
-                <button key={p.id} onClick={() => togglePlayer(p.id)} className="flex flex-col items-center gap-1 p-1.5 rounded-lg border" style={{ borderColor: selectedPlayers.includes(p.id) ? COLORS.turf : COLORS.line, background: selectedPlayers.includes(p.id) ? "rgba(31,110,67,0.08)" : "white" }}>
+                <button key={p.id} onClick={() => togglePlayer(p.id)} className="flex flex-col items-center gap-1 p-1.5 rounded-lg border" style={{ borderColor: refundSelectedPlayers.includes(p.id) ? COLORS.turf : COLORS.line, background: refundSelectedPlayers.includes(p.id) ? "rgba(31,110,67,0.08)" : "white" }}>
                   <PlayerAvatar name={p.name} photo={p.photo} size={30} /><span className="text-[9px] leading-tight">#{p.number}</span>
                 </button>
               ))}
             </div>
-            <textarea value={reason} onChange={e => setReason(e.target.value)} placeholder="Motif de la demande (ex : joueur blessé non aligné, frais engagés...)" rows={3} className="w-full border rounded-lg px-3 py-2 text-sm mb-3 outline-none" style={{ borderColor: COLORS.line }} />
+            <textarea value={refundReason} onChange={e => setRefundReason(e.target.value)} placeholder="Motif de la demande (ex : joueur blessé non aligné, frais engagés...)" rows={3} className="w-full border rounded-lg px-3 py-2 text-sm mb-3 outline-none" style={{ borderColor: COLORS.line }} />
             <button
               onClick={() => askSaveConfirm(
                 "Cette demande sera envoyée aux ayants droit pour validation.",
                 [
-                  { label: "Joueurs concernés", value: myTeam.players.filter(p => selectedPlayers.includes(p.id)).map(p => p.name).join(", ") },
-                  { label: "Motif", value: reason.trim() },
+                  { label: "Joueurs concernés", value: myTeam.players.filter(p => refundSelectedPlayers.includes(p.id)).map(p => p.name).join(", ") },
+                  { label: "Motif", value: refundReason.trim() },
                 ],
                 submit,
                 "Envoyer la demande"
               )}
-              disabled={selectedPlayers.length === 0 || !reason.trim()}
+              disabled={refundSelectedPlayers.length === 0 || !refundReason.trim()}
               className="px-4 py-2 rounded-lg text-sm font-semibold text-white disabled:opacity-40" style={{ background: COLORS.turf }}
             >Envoyer la demande</button>
           </div>
@@ -2136,7 +2147,12 @@ export default function TourneyOS() {
                       </td>
                       <td className="px-2">
                         <div className="flex items-center gap-1">
-                          <button onClick={() => setLicenseView({ team: manageTeam, player: p })} className="text-[11px] font-mono px-2 py-1 rounded-md" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>{p.license || "—"}</button>
+                          {canManageRosters ? (
+                            <input value={p.license || ""} onChange={e => updatePlayerField(manageTeam.id, p.id, "license", e.target.value)} className="text-[11px] font-mono px-2 py-1 rounded-md w-24 outline-none" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }} />
+                          ) : (
+                            <span className="text-[11px] font-mono px-2 py-1 rounded-md" style={{ background: "rgba(31,110,67,0.08)", color: COLORS.turf }}>{p.license || "—"}</span>
+                          )}
+                          <button onClick={() => setLicenseView({ team: manageTeam, player: p })} title="Voir la carte de licence" className="text-stone-300 hover:text-stone-500"><ClipboardList size={13} /></button>
                           {canManageAll && <button onClick={() => suspendPlayer(manageTeam.id, p.id, !p.manuallySuspended)} title={p.manuallySuspended ? "Réactiver le joueur" : "Suspendre le joueur"} className={p.manuallySuspended ? "text-red-600" : "text-stone-300 hover:text-amber-600"}><Ban size={13} /></button>}
                         </div>
                       </td>
@@ -2343,8 +2359,6 @@ export default function TourneyOS() {
     const awayLineup = match.lineups?.[match.away] || { starters: [], bench: [], validated: false };
     const canKickoff = homeLineup.validated && awayLineup.validated;
     const pending = (match.subRequests || []).filter(r => r.status === "pending");
-    const [showSheet, setShowSheet] = useState(false);
-
     function EventButtons({ team, teamId }) {
       const onField = onFieldPlayers(match, teamId, team);
       const [selectedId, setSelectedId] = useState(onField[0]?.id);
@@ -2393,7 +2407,7 @@ export default function TourneyOS() {
               {matches.map(m => teamById[m.home] && teamById[m.away] && <option key={m.id} value={m.id}>Poule {m.pool} · {teamById[m.home].name} vs {teamById[m.away].name}</option>)}
               {bracketMatches.map(m => <option key={m.id} value={m.id}>{m.roundLabel} · {teamById[m.home].name} vs {teamById[m.away].name}</option>)}
             </select>
-            <button onClick={() => setShowSheet(true)} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: "rgba(13,40,24,0.06)", color: COLORS.pitch }}><Printer size={13} />Imprimer la feuille de match</button>
+            <button onClick={() => setShowMatchSheet(true)} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: "rgba(13,40,24,0.06)", color: COLORS.pitch }}><Printer size={13} />Imprimer la feuille de match</button>
           </div>
           <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-4">
             <div className="flex items-center gap-2"><Badge name={home.name} logo={home.logo} size={36} /><span className="font-bold">{home.name}</span></div>
@@ -2449,14 +2463,14 @@ export default function TourneyOS() {
             </div>
           </div>
         )}
-        {showSheet && (
-          <div className="fixed inset-0 z-30 bg-black/50 flex items-center justify-center p-4 overflow-y-auto" onClick={() => setShowSheet(false)}>
+        {showMatchSheet && (
+          <div className="fixed inset-0 z-30 bg-black/50 flex items-center justify-center p-4 overflow-y-auto" onClick={() => setShowMatchSheet(false)}>
             <div className="bg-white rounded-2xl p-6 max-w-2xl w-full" onClick={e => e.stopPropagation()}>
               <div className="flex items-center justify-between mb-4 no-print">
                 <h3 className="font-black text-lg" style={{ color: COLORS.ink, fontFamily: "'Barlow Condensed', sans-serif" }}>Feuille de match</h3>
                 <div className="flex gap-2">
                   <button onClick={() => window.print()} className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: COLORS.turf }}><Printer size={13} />Imprimer / PDF</button>
-                  <button onClick={() => setShowSheet(false)} className="text-stone-400 hover:text-stone-600 text-sm font-semibold">Fermer</button>
+                  <button onClick={() => setShowMatchSheet(false)} className="text-stone-400 hover:text-stone-600 text-sm font-semibold">Fermer</button>
                 </div>
               </div>
               <div className="print-area"><PrintableMatchSheet match={match} home={home} away={away} teamById={teamById} /></div>
@@ -2694,11 +2708,6 @@ export default function TourneyOS() {
     const standings = computeStandingsForEvent(ev);
     const scorers = computeTopScorersForEvent(ev);
     const suspended = computeSuspendedForEvent(ev);
-    const [posterPool, setPosterPool] = useState(null);
-    const [posterCfg, setPosterCfg] = useState({ slogan: "Le fair-play avant tout", location: "", instagram: "", facebook: "", accent: "#F5A623" });
-    const [printMode, setPrintMode] = useState(null); // 'schedule' | 'bracket' | 'match'
-    const [printPoolFilter, setPrintPoolFilter] = useState("all");
-    const [printMatchId, setPrintMatchId] = useState(null);
     const sortedProgrammeMatches = [...ev.matches].sort((a, b) => (a.date || "9999-99-99").localeCompare(b.date || "9999-99-99") || (a.slot ?? 0) - (b.slot ?? 0));
     return (
       <div>
