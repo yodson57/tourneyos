@@ -122,6 +122,7 @@ function defaultSettings(name) {
     name, win: 3, draw: 1, loss: 0, halfMinutes: 25, subs: 5, poolSize: 4,
     showPlayerProfiles: true, showTopScorers: true, manualDraw: false,
     suspensionRule: 2, suspensionMatches: 1, allowTeamRemovalAfterLaunch: false, qualifiersPerPool: 2,
+    cardsTiebreak: false,
     requireTeamLogo: false, showScorerPhoto: true, showCaptainPhoto: true, publicAccess: true,
     cardValidity: "", cardHeader: "", cardOrientation: "horizontal", cardSizePreset: "86x54",
     cardBg: "#FFFFFF", cardBorder: "#1F6E43", cardPhotoPosition: "left",
@@ -374,10 +375,11 @@ function propagateBracketWinners(bracket) {
 function computeStandingsForEvent(ev) {
   if (!ev.pools) return {};
   const teamById = Object.fromEntries(ev.teams.map(t => [t.id, t]));
+  const cardsTiebreak = !!ev.settings.cardsTiebreak;
   const out = {};
   Object.entries(ev.pools).forEach(([poolName, ids]) => {
     const validIds = ids.filter(id => teamById[id]);
-    const table = Object.fromEntries(validIds.map(id => [id, { id, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0 }]));
+    const table = Object.fromEntries(validIds.map(id => [id, { id, played: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0, yc: 0, rc: 0, fairPlayPts: 0 }]));
     ev.matches.filter(m => m.pool === poolName && m.status === "done" && table[m.home] && table[m.away]).forEach(m => {
       const h = table[m.home], a = table[m.away];
       h.played++; a.played++;
@@ -385,8 +387,20 @@ function computeStandingsForEvent(ev) {
       if (m.homeScore > m.awayScore) { h.w++; a.l++; h.pts += ev.settings.win; a.pts += ev.settings.loss; }
       else if (m.homeScore < m.awayScore) { a.w++; h.l++; a.pts += ev.settings.win; h.pts += ev.settings.loss; }
       else { h.d++; a.d++; h.pts += ev.settings.draw; a.pts += ev.settings.draw; }
+      (m.events || []).forEach(ev2 => {
+        const t = table[ev2.teamId];
+        if (!t) return;
+        if (ev2.type === "yellow") { t.yc++; t.fairPlayPts += 1; }
+        if (ev2.type === "red") { t.rc++; t.fairPlayPts += 3; }
+      });
     });
-    out[poolName] = Object.values(table).sort((x, y) => y.pts - x.pts || (y.gf - y.ga) - (x.gf - x.ga) || y.gf - x.gf);
+    out[poolName] = Object.values(table).sort((x, y) =>
+      y.pts - x.pts
+      || (y.gf - y.ga) - (x.gf - x.ga)
+      || y.gf - x.gf
+      || (cardsTiebreak ? x.fairPlayPts - y.fairPlayPts : 0) // moins de cartons = mieux classé
+      || (teamById[x.id]?.name || "").localeCompare(teamById[y.id]?.name || "")
+    );
   });
   return out;
 }
@@ -1624,6 +1638,9 @@ export default function TourneyOS() {
           <Toggle checked={draft.showCaptainPhoto} onChange={v => patchDraft({ showCaptainPhoto: v })} label="Photo du capitaine" hint="Affiche la photo du capitaine d'équipe sur les affiches/programmes de match." />
           <Toggle checked={draft.publicAccess} onChange={v => patchDraft({ publicAccess: v })} label="Accès public (sans connexion)" hint="Si activé, le programme et les statistiques de cet événement sont visibles par le grand public sans se connecter, dès que le tirage est lancé." />
           <div className="pt-3 grid grid-cols-1 sm:grid-cols-3 gap-4">{NumberField({ label: "Cartons jaunes avant suspension", value: draft.suspensionRule, onChange: v => patchDraft({ suspensionRule: v }) })}{NumberField({ label: "Nombre de matchs de suspension", value: draft.suspensionMatches, onChange: v => patchDraft({ suspensionMatches: v }) })}{NumberField({ label: "Qualifiés par poule (phase finale)", value: draft.qualifiersPerPool, onChange: v => patchDraft({ qualifiersPerPool: v }) })}</div>
+          <div className="pt-3 border-t mt-3" style={{ borderColor: COLORS.line }}>
+            <Toggle checked={draft.cardsTiebreak} onChange={v => patchDraft({ cardsTiebreak: v })} label="Cartons comme critère de départage (fair-play)" hint="En cas d'égalité parfaite (points, différence de buts, buts marqués), l'équipe qui a reçu le moins de cartons (jaune = 1 pt, rouge = 3 pts) est mieux classée." />
+          </div>
         </div>
         <div className="sticky bottom-4 mt-6 flex justify-end">
           <button
@@ -2846,12 +2863,14 @@ export default function TourneyOS() {
                 </div>
                 <div className="overflow-x-auto">
                 <table className="w-full text-sm">
-                  <thead><tr className="text-[11px] uppercase text-stone-400 border-b" style={{ borderColor: COLORS.line }}><th className="text-left px-3 py-1.5">Équipe</th><th className="px-1.5">J</th><th className="px-1.5">V</th><th className="px-1.5">N</th><th className="px-1.5">D</th><th className="px-1.5">Diff</th><th className="px-2 font-bold">Pts</th></tr></thead>
+                  <thead><tr className="text-[11px] uppercase text-stone-400 border-b" style={{ borderColor: COLORS.line }}><th className="text-left px-3 py-1.5">Équipe</th><th className="px-1.5">J</th><th className="px-1.5">V</th><th className="px-1.5">N</th><th className="px-1.5">D</th><th className="px-1.5">Diff</th>{ev.settings.cardsTiebreak && <th className="px-1.5" title="Points fair-play (jaune=1, rouge=3) — départage en cas d'égalité">FP</th>}<th className="px-2 font-bold">Pts</th></tr></thead>
                   <tbody>{table.map((row, idx) => tb[row.id] && (
                     <tr key={row.id} className={idx < 2 ? "" : "text-stone-400"} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                       <td className="px-3 py-1.5 flex items-center gap-1.5 font-medium whitespace-nowrap"><Badge name={tb[row.id].name} logo={tb[row.id].logo} size={20} />{tb[row.id].name}</td>
                       <td className="text-center">{row.played}</td><td className="text-center">{row.w}</td><td className="text-center">{row.d}</td><td className="text-center">{row.l}</td>
-                      <td className="text-center">{row.gf - row.ga > 0 ? `+${row.gf - row.ga}` : row.gf - row.ga}</td><td className="text-center font-mono font-bold" style={{ color: COLORS.turf }}>{row.pts}</td>
+                      <td className="text-center">{row.gf - row.ga > 0 ? `+${row.gf - row.ga}` : row.gf - row.ga}</td>
+                      {ev.settings.cardsTiebreak && <td className="text-center text-xs">{row.fairPlayPts}</td>}
+                      <td className="text-center font-mono font-bold" style={{ color: COLORS.turf }}>{row.pts}</td>
                     </tr>
                   ))}</tbody>
                 </table>
